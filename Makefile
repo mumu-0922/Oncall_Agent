@@ -454,7 +454,7 @@ dev: api-dev
 
 api-dev:
 	@echo "$(YELLOW)🔧 启动 FastAPI 开发服务器（热重载）...$(NC)"
-	$(PYTHON) -m uvicorn app.main:app --reload --host 0.0.0.0 --port 9900
+	$(PYTHON) -m uvicorn app.main:app --reload --reload-dir app --reload-dir mcp_servers --host 0.0.0.0 --port 9900
 
 web-install:
 	@echo "$(YELLOW)📦 安装前端依赖...$(NC)"
@@ -479,7 +479,7 @@ dev-all:
 	@echo "$(YELLOW)🧩 开发态前后端分离启动...$(NC)"
 	@echo "$(CYAN)FastAPI: $(SERVER_URL) | Vite: $(WEB_URL)$(NC)"
 	@trap 'kill 0' INT TERM EXIT; \
-		$(PYTHON) -m uvicorn app.main:app --reload --host 0.0.0.0 --port 9900 & \
+		$(PYTHON) -m uvicorn app.main:app --reload --reload-dir app --reload-dir mcp_servers --host 0.0.0.0 --port 9900 & \
 		npm --prefix $(FRONTEND_DIR) run dev & \
 		wait
 
