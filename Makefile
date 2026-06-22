@@ -478,6 +478,8 @@ web-preview:
 dev-all:
 	@echo "$(YELLOW)🧩 开发态前后端分离启动...$(NC)"
 	@echo "$(CYAN)FastAPI: $(SERVER_URL) | Vite: $(WEB_URL)$(NC)"
+	@$(MAKE) start-cls
+	@$(MAKE) start-monitor
 	@trap 'kill 0' INT TERM EXIT; \
 		$(PYTHON) -m uvicorn app.main:app --reload --reload-dir app --reload-dir mcp_servers --host 0.0.0.0 --port 9900 & \
 		npm --prefix $(FRONTEND_DIR) run dev & \
