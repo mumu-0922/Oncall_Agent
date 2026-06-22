@@ -1,7 +1,9 @@
 // SuperBizAgent 前端应用
+import './styles.css';
+
 class SuperBizAgentApp {
     constructor() {
-        this.apiBaseUrl = 'http://localhost:9900/api';
+        this.apiBaseUrl = this.resolveApiBaseUrl();
         this.currentMode = 'quick'; // 'quick' 或 'stream'
         this.sessionId = this.generateSessionId();
         this.isStreaming = false;
@@ -15,6 +17,14 @@ class SuperBizAgentApp {
         this.initMarkdown();
         this.checkAndSetCentered();
         this.renderChatHistory();
+    }
+
+
+    // 解析 API Base：开发态由 Vite proxy 接 /api，生产态与 FastAPI 同源
+    resolveApiBaseUrl() {
+        const fromEnv = import.meta.env?.VITE_API_BASE_URL;
+        const apiBaseUrl = fromEnv && fromEnv.trim() ? fromEnv.trim() : '/api';
+        return apiBaseUrl.replace(/\/$/, '');
     }
 
     // 初始化Markdown配置
@@ -439,7 +449,7 @@ class SuperBizAgentApp {
         
         try {
             // 从后端获取会话历史
-            const response = await fetch(`/api/chat/session/${historyId}`);
+            const response = await fetch(`${this.apiBaseUrl}/chat/session/${historyId}`);
             if (response.ok) {
                 const data = await response.json();
                 const backendHistory = data.history || [];
@@ -506,7 +516,7 @@ class SuperBizAgentApp {
     async deleteChatHistory(historyId) {
         try {
             // 调用后端API清空会话
-            const response = await fetch('/api/chat/clear', {
+            const response = await fetch(`${this.apiBaseUrl}/chat/clear`, {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json',

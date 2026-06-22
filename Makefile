@@ -11,6 +11,8 @@ DOCS_DIR = aiops-docs
 MILVUS_CONTAINER = milvus-standalone
 PYTHON ?= .venv/bin/python
 MODE ?= local
+FRONTEND_DIR = frontend
+WEB_URL = http://localhost:5173
 
 # 颜色输出
 GREEN = \033[0;32m
@@ -21,6 +23,7 @@ NC = \033[0m
 
 .PHONY: help init one open start stop restart check upload clean up down status wait \
         install install-dev dev run test test-quick format lint fix type-check \
+        web-install web-dev web-build web-preview api-dev dev-all \
         security pre-commit-install pre-commit check-all coverage eval-retrieval eval-rag docs shell \
         ipython watch add add-dev remove list-docs test-upload sync logs \
         start-cls stop-cls start-monitor stop-monitor start-api stop-api status-mcp
@@ -59,7 +62,11 @@ help:
 	@echo "  $(YELLOW)make stop-api$(NC)      - 🛑 停止 FastAPI 服务"
 	@echo ""
 	@echo "$(CYAN)【开发模式】$(NC)"
-	@echo "  $(YELLOW)make dev$(NC)          - 🔧 开发模式运行（前台，热重载）"
+	@echo "  $(YELLOW)make dev$(NC)          - 🔧 后端开发模式运行（等同 make api-dev）"
+	@echo "  $(YELLOW)make api-dev$(NC)      - 🔧 FastAPI 热重载，监听 9900"
+	@echo "  $(YELLOW)make web-dev$(NC)      - 🎨 Vite 前端开发服务，监听 5173"
+	@echo "  $(YELLOW)make dev-all$(NC)      - 🧩 开发态前后端分离并行启动"
+	@echo "  $(YELLOW)make web-build$(NC)    - 🏗️  构建前端到 static/ 供 FastAPI 托管"
 	@echo "  $(YELLOW)make run$(NC)          - 🏭 生产模式运行（前台）"
 	@echo ""
 	@echo "$(CYAN)【文档管理】$(NC)"
@@ -145,7 +152,7 @@ open:
 	@echo "  健康检查: $(YELLOW)$(HEALTH_CHECK_API)$(NC)"
 	@echo "  Milvus UI: $(YELLOW)http://localhost:8000$(NC)"
 	@echo ""
-	@echo "$(CYAN)提示：本项目没有单独 npm 前端服务，static/ 前端由 FastAPI 一起托管。$(NC)"
+	@echo "$(CYAN)提示：生产/演示态由 FastAPI 托管 static/；前端开发态可单独运行 make web-dev。$(NC)"
 
 # ============================================================
 # Docker 管理
@@ -443,9 +450,38 @@ check:
 	fi
 
 # 开发模式运行（前台，热重载）
-dev:
-	@echo "$(YELLOW)🔧 启动开发服务器（热重载）...$(NC)"
-	.venv/bin/python -m uvicorn app.main:app --reload --host 0.0.0.0 --port 9900
+dev: api-dev
+
+api-dev:
+	@echo "$(YELLOW)🔧 启动 FastAPI 开发服务器（热重载）...$(NC)"
+	$(PYTHON) -m uvicorn app.main:app --reload --host 0.0.0.0 --port 9900
+
+web-install:
+	@echo "$(YELLOW)📦 安装前端依赖...$(NC)"
+	npm --prefix $(FRONTEND_DIR) ci
+	@echo "$(GREEN)✅ 前端依赖安装完成$(NC)"
+
+web-dev:
+	@echo "$(YELLOW)🎨 启动 Vite 前端开发服务器...$(NC)"
+	@echo "$(CYAN)前端: $(WEB_URL) | API proxy: $(SERVER_URL)$(NC)"
+	npm --prefix $(FRONTEND_DIR) run dev
+
+web-build:
+	@echo "$(YELLOW)🏗️  构建前端到 static/，供 FastAPI 生产态一体托管...$(NC)"
+	npm --prefix $(FRONTEND_DIR) run build
+	@echo "$(GREEN)✅ 前端构建完成：static/$(NC)"
+
+web-preview:
+	@echo "$(YELLOW)👁️  预览前端构建产物...$(NC)"
+	npm --prefix $(FRONTEND_DIR) run preview
+
+dev-all:
+	@echo "$(YELLOW)🧩 开发态前后端分离启动...$(NC)"
+	@echo "$(CYAN)FastAPI: $(SERVER_URL) | Vite: $(WEB_URL)$(NC)"
+	@trap 'kill 0' INT TERM EXIT; \
+		$(PYTHON) -m uvicorn app.main:app --reload --host 0.0.0.0 --port 9900 & \
+		npm --prefix $(FRONTEND_DIR) run dev & \
+		wait
 
 # 生产模式运行（前台）
 run:

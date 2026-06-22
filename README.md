@@ -17,6 +17,7 @@
 ## 🛠️ 技术栈
 
 - **框架**: FastAPI + LangChain + LangGraph
+- **前端**: Vite 开发态分离，`npm run build` 输出 `static/` 后由 FastAPI 托管
 - **LLM**: 阿里云 DashScope (通义千问)
 - **向量库**: Milvus
 - **工具协议**: MCP (Model Context Protocol)
@@ -50,10 +51,10 @@ pip install -e .
 # 首次使用需要编辑 .env 文件，填入你的 DASHSCOPE_API_KEY
 vim .env  # 或使用其他编辑器
 
-# 4. 一键初始化（启动 Docker + 服务 + 上传文档）
-make init
+# 4. 单端口演示（Milvus + MCP + FastAPI 托管 static 前端 + 上传文档）
+make one
 
-# 5. 一键启动
+# 5. 后台启动/重启已有环境
 make start
 ```
 
@@ -124,8 +125,32 @@ python -c "import requests, os, time; [requests.post('http://localhost:9900/api/
 ```
 
 ### 访问服务
-- **Web 界面**: http://localhost:9900
+- **生产/演示 Web 界面**: http://localhost:9900
 - **API 文档**: http://localhost:9900/docs
+- **开发态 Vite 前端**: http://localhost:5173（仅前端开发时单独启动）
+
+## 🧭 前端架构
+
+本项目采用“开发态分离、生产态一体托管”的前端架构，详见 `docs/frontend_architecture_decision.md`。
+
+- **开发态**：FastAPI 与 Vite 分离运行。FastAPI 监听 `9900` 提供 `/api/*`，Vite 监听 `5173` 提供 HMR 和前端源码调试；前端请求使用相对路径 `/api/...`，由 Vite dev proxy 转发到 FastAPI。
+- **生产态**：在 `frontend/` 执行 `npm run build`，构建产物输出到仓库根目录 `static/`；FastAPI 挂载 `static/`，统一提供 `/`、`/static/*` 和 `/api/*`。
+- **单端口演示**：`make one` 保持单端口入口，只暴露 `http://localhost:9900`，不启动独立 Vite dev server；若前端源码变更，先构建刷新 `static/`，再执行 `make one`。
+
+常用前端命令：
+
+```bash
+# 开发态：后端 API
+.venv/bin/python -m uvicorn app.main:app --reload --host 0.0.0.0 --port 9900
+
+# 开发态：前端 Vite
+cd frontend
+npm ci
+npm run dev
+
+# 生产态：生成 FastAPI 托管的 static/ 产物
+npm run build
+```
 
 ## 📡 API 接口
 
@@ -137,7 +162,7 @@ python -c "import requests, os, time; [requests.post('http://localhost:9900/api/
 | 流式对话 | POST | `/api/chat_stream` | SSE 流式输出 |
 | AIOps 诊断 | POST | `/api/aiops` | 自动故障诊断（流式） |
 | 文件上传 | POST | `/api/upload` | 上传并索引文档 |
-| 健康检查 | GET | `/api/health` | 服务状态检查 |
+| 健康检查 | GET | `/health` | 服务状态检查 |
 | RAG 调试 | POST | `/api/rag/retrieve_debug` | 返回检索候选、score、channels、parent/child id |
 
 ### 使用示例
@@ -220,10 +245,13 @@ super_biz_agent_py/
 │   └── utils/                              # 工具类
 │       ├── __init__.py
 │       └── logger.py                       # 日志配置（Loguru）
-├── static/                                 # Web 前端（纯静态）
-│   ├── index.html                          # 主页面
-│   ├── app.js                              # 前端逻辑
-│   └── styles.css                          # 样式表
+├── frontend/                               # Vite 前端源码（开发态独立运行）
+│   ├── package.json                        # npm scripts 与前端依赖
+│   ├── vite.config.*                       # Vite 配置，开发态代理 /api 到 FastAPI
+│   └── src/                                # 前端业务源码
+├── static/                                 # 前端生产构建产物（由 FastAPI 一体托管）
+│   ├── index.html                          # 生产首页
+│   └── assets/                             # Vite 构建资源；可兼容既有静态文件
 ├── mcp_servers/                            # MCP 服务器
 │   ├── cls_server.py                       # CLS 日志查询服务
 │   ├── monitor_server.py                   # 监控数据服务
@@ -343,10 +371,17 @@ curl -X POST "http://localhost:9900/api/aiops" \
 
 ```bash
 # 项目管理
+make one               # 单端口演示（FastAPI 托管 static 前端）
 make init              # 一键初始化（Docker + 服务 + 文档）
 make start             # 启动所有服务
 make stop              # 停止所有服务
 make restart           # 重启所有服务
+
+# 前端开发/构建
+make api-dev           # 后端开发态：FastAPI reload，监听 9900
+make web-install       # 安装前端依赖
+make web-dev           # 前端开发态：Vite HMR，监听 5173
+make web-build         # 前端生产态：输出 static/，交给 FastAPI 托管
 
 # 依赖管理
 make install-dev       # 安装开发依赖
