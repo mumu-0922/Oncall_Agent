@@ -19,7 +19,7 @@ RED = \033[0;31m
 CYAN = \033[0;36m
 NC = \033[0m
 
-.PHONY: help init start stop restart check upload clean up down status wait \
+.PHONY: help init one open start stop restart check upload clean up down status wait \
         install install-dev dev run test test-quick format lint fix type-check \
         security pre-commit-install pre-commit check-all coverage eval-retrieval eval-rag docs shell \
         ipython watch add add-dev remove list-docs test-upload sync logs \
@@ -34,7 +34,8 @@ help:
 	@echo "$(GREEN)═══════════════════════════════════════════════════════$(NC)"
 	@echo ""
 	@echo "$(CYAN)【一键操作】$(NC)"
-	@echo "  $(YELLOW)make init$(NC)         - 🚀 一键初始化（Docker → 服务 → 上传文档）"
+	@echo "  $(YELLOW)make one$(NC)          - ⚡ 一键启动前后端（Milvus → API/Web → 上传文档）"
+	@echo "  $(YELLOW)make init$(NC)         - 🚀 一键初始化（等同 make one）"
 	@echo ""
 	@echo "$(CYAN)【Docker 管理】$(NC)"
 	@echo "  $(YELLOW)make up$(NC)           - 🐳 启动 Milvus 容器"
@@ -42,9 +43,10 @@ help:
 	@echo "  $(YELLOW)make status$(NC)       - 📊 查看容器状态"
 	@echo ""
 	@echo "$(CYAN)【服务管理】$(NC)"
-	@echo "  $(YELLOW)make start$(NC)        - 🚀 启动所有服务（MCP + FastAPI）"
+	@echo "  $(YELLOW)make start$(NC)        - 🚀 启动所有服务（MCP + FastAPI/静态前端）"
 	@echo "  $(YELLOW)make stop$(NC)         - 🛑 停止所有服务（MCP + FastAPI）"
 	@echo "  $(YELLOW)make restart$(NC)      - 🔄 重启所有服务"
+	@echo "  $(YELLOW)make open$(NC)         - 🌐 打印前端/API 访问地址"
 	@echo "  $(YELLOW)make check$(NC)        - 🔍 检查 FastAPI 服务状态"
 	@echo "  $(YELLOW)make status-mcp$(NC)   - 📊 查看 MCP 服务状态"
 	@echo ""
@@ -126,6 +128,24 @@ init:
 	@echo "$(YELLOW)💡 提示: 服务正在后台运行$(NC)"
 	@echo "   查看日志: $(YELLOW)tail -f server.log$(NC)"
 	@echo "   停止服务: $(YELLOW)make stop$(NC)"
+
+
+# 真正的一键启动：Milvus + MCP + FastAPI(托管 static 前端) + 文档上传
+one: init
+	@echo ""
+	@$(MAKE) open
+
+# 打印访问入口（WSL/远程环境不强行 xdg-open）
+open:
+	@echo "$(GREEN)═══════════════════════════════════════════════════════$(NC)"
+	@echo "$(GREEN)🌐 访问入口$(NC)"
+	@echo "$(GREEN)═══════════════════════════════════════════════════════$(NC)"
+	@echo "  前端页面: $(YELLOW)$(SERVER_URL)$(NC)"
+	@echo "  API 文档: $(YELLOW)$(SERVER_URL)/docs$(NC)"
+	@echo "  健康检查: $(YELLOW)$(HEALTH_CHECK_API)$(NC)"
+	@echo "  Milvus UI: $(YELLOW)http://localhost:8000$(NC)"
+	@echo ""
+	@echo "$(CYAN)提示：本项目没有单独 npm 前端服务，static/ 前端由 FastAPI 一起托管。$(NC)"
 
 # ============================================================
 # Docker 管理
