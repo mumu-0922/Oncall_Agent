@@ -7,6 +7,8 @@ from langchain_core.tools import tool
 from loguru import logger
 
 from app.config import config
+from app.models.rag import RetrievalCandidate
+from app.services.hybrid_retrieval_service import hybrid_retrieval_service
 from app.services.vector_store_manager import vector_store_manager
 
 
@@ -25,13 +27,14 @@ def retrieve_knowledge(query: str) -> Tuple[str, List[Document]]:
     try:
         logger.info(f"知识检索工具被调用: query='{query}'")
         
-        # 从向量存储中检索相关文档
-        vector_store = vector_store_manager.get_vector_store()
-        retriever = vector_store.as_retriever(
-            search_kwargs={"k": config.rag_top_k}
-        )
-        
-        docs = retriever.invoke(query)
+        if config.rag_retrieval_mode in {"hybrid", "hybrid_parent"}:
+            candidates = hybrid_retrieval_service.retrieve(query, mode=config.rag_retrieval_mode)
+            docs = candidates_to_documents(candidates)
+        else:
+            # 从向量存储中检索相关文档
+            vector_store = vector_store_manager.get_vector_store()
+            retriever = vector_store.as_retriever(search_kwargs={"k": config.rag_top_k})
+            docs = retriever.invoke(query)
         
         if not docs:
             logger.warning("未检索到相关文档")
@@ -83,3 +86,23 @@ def format_docs(docs: List[Document]) -> str:
         formatted_parts.append(formatted)
     
     return "\n".join(formatted_parts)
+
+
+def candidates_to_documents(candidates: List[RetrievalCandidate]) -> List[Document]:
+    """Convert retrieval candidates to LangChain documents for tool artifacts."""
+    docs: List[Document] = []
+    for candidate in candidates:
+        metadata = {
+            **candidate.metadata,
+            "child_id": candidate.child_id,
+            "parent_id": candidate.parent_id,
+            "_source": candidate.source,
+            "_file_name": candidate.file_name,
+            "title_path": candidate.title_path,
+            "dense_score": candidate.dense_score,
+            "bm25_score": candidate.bm25_score,
+            "rerank_score": candidate.rerank_score,
+            "retrieval_channels": candidate.retrieval_channels,
+        }
+        docs.append(Document(page_content=candidate.content, metadata=metadata))
+    return docs

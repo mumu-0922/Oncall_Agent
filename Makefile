@@ -9,6 +9,8 @@ UPLOAD_API = $(SERVER_URL)/api/upload
 HEALTH_CHECK_API = $(SERVER_URL)/health
 DOCS_DIR = aiops-docs
 MILVUS_CONTAINER = milvus-standalone
+PYTHON ?= .venv/bin/python
+MODE ?= local
 
 # 颜色输出
 GREEN = \033[0;32m
@@ -19,7 +21,7 @@ NC = \033[0m
 
 .PHONY: help init start stop restart check upload clean up down status wait \
         install install-dev dev run test test-quick format lint fix type-check \
-        security pre-commit-install pre-commit check-all coverage docs shell \
+        security pre-commit-install pre-commit check-all coverage eval-retrieval eval-rag docs shell \
         ipython watch add add-dev remove list-docs test-upload sync logs \
         start-cls stop-cls start-monitor stop-monitor start-api stop-api status-mcp
 
@@ -74,6 +76,7 @@ help:
 	@echo "  $(YELLOW)make lint$(NC)         - 🔍 代码检查"
 	@echo "  $(YELLOW)make fix$(NC)          - 🔧 自动修复问题"
 	@echo "  $(YELLOW)make test$(NC)         - 🧪 运行测试"
+	@echo "  $(YELLOW)make eval-retrieval$(NC) - 📊 运行 RAG 检索 golden cases"
 	@echo "  $(YELLOW)make check-all$(NC)    - ✅ 运行所有检查"
 	@echo ""
 	@echo "$(CYAN)【其他】$(NC)"
@@ -532,38 +535,38 @@ remove:  ## 移除依赖包 (用法: make remove PKG=package_name)
 
 format:  ## 格式化代码
 	@echo "$(YELLOW)🎨 格式化代码...$(NC)"
-	python3 -m ruff check --select I --fix app/ 2>/dev/null || true
-	python3 -m ruff format app/ 2>/dev/null || python3 -m black app/
+	$(PYTHON) -m ruff check --select I --fix app/ 2>/dev/null || true
+	$(PYTHON) -m ruff format app/ 2>/dev/null || $(PYTHON) -m black app/
 	@echo "$(GREEN)✅ 格式化完成$(NC)"
 
 lint:  ## 代码检查
 	@echo "$(YELLOW)🔍 代码检查...$(NC)"
-	python3 -m ruff check app/ 2>/dev/null || python3 -m flake8 app/
+	$(PYTHON) -m ruff check app/ 2>/dev/null || $(PYTHON) -m flake8 app/
 	@echo "$(GREEN)✅ 检查完成$(NC)"
 
 fix:  ## 自动修复代码问题
 	@echo "$(YELLOW)🔧 自动修复代码问题...$(NC)"
-	python3 -m ruff check --fix app/ 2>/dev/null || true
-	python3 -m ruff format app/ 2>/dev/null || python3 -m black app/
+	$(PYTHON) -m ruff check --fix app/ 2>/dev/null || true
+	$(PYTHON) -m ruff format app/ 2>/dev/null || $(PYTHON) -m black app/
 	@echo "$(GREEN)✅ 修复完成$(NC)"
 
 type-check:  ## 类型检查
 	@echo "$(YELLOW)🔍 类型检查...$(NC)"
-	python3 -m mypy app/ --ignore-missing-imports
+	$(PYTHON) -m mypy app/ --ignore-missing-imports
 	@echo "$(GREEN)✅ 类型检查完成$(NC)"
 
 security:  ## 安全检查
 	@echo "$(YELLOW)🔒 安全检查...$(NC)"
-	python3 -m bandit -r app/ -ll
+	$(PYTHON) -m bandit -r app/ -ll
 	@echo "$(GREEN)✅ 安全检查完成$(NC)"
 
 test:  ## 运行测试
 	@echo "$(YELLOW)🧪 运行测试...$(NC)"
-	python3 -m pytest tests/ -v --cov=app --cov-report=term-missing --cov-report=html
+	$(PYTHON) -m pytest tests/ -v --cov=app --cov-report=term-missing --cov-report=html
 
 test-quick:  ## 快速测试
 	@echo "$(YELLOW)⚡ 快速测试...$(NC)"
-	python3 -m pytest tests/ -v
+	$(PYTHON) -m pytest tests/ -v
 
 check-all:  ## 运行所有检查
 	@echo "$(YELLOW)🚀 运行所有检查...$(NC)"
@@ -574,19 +577,28 @@ check-all:  ## 运行所有检查
 
 pre-commit-install:  ## 安装 pre-commit hooks
 	@echo "$(YELLOW)🔗 安装 pre-commit hooks...$(NC)"
-	python3 -m pre_commit install
-	python3 -m pre_commit install --hook-type commit-msg
+	$(PYTHON) -m pre_commit install
+	$(PYTHON) -m pre_commit install --hook-type commit-msg
 	@echo "$(GREEN)✅ Pre-commit hooks 安装完成$(NC)"
 
 pre-commit:  ## 运行 pre-commit 检查
 	@echo "$(YELLOW)🔍 运行 pre-commit 检查...$(NC)"
-	python3 -m pre_commit run --all-files
+	$(PYTHON) -m pre_commit run --all-files
 
 coverage:  ## 查看测试覆盖率报告
 	@echo "$(YELLOW)📊 生成覆盖率报告...$(NC)"
-	python3 -m pytest tests/ --cov=app --cov-report=html --cov-report=term
+	$(PYTHON) -m pytest tests/ --cov=app --cov-report=html --cov-report=term
 	@echo "$(GREEN)✅ 覆盖率报告已生成: htmlcov/index.html$(NC)"
 	@open htmlcov/index.html 2>/dev/null || xdg-open htmlcov/index.html 2>/dev/null || echo "请手动打开 htmlcov/index.html"
+
+eval-retrieval:  ## 运行 RAG 检索 golden cases（默认本地离线 baseline）
+	@echo "$(YELLOW)📊 运行 RAG 检索评估...$(NC)"
+	$(PYTHON) scripts/eval_retrieval.py --mode local --k 3 --out evals/retrieval_local_report.json
+
+eval-rag:  ## 运行指定 RAG 模式评估 (用法: make eval-rag MODE=hybrid_parent)
+	@echo "$(YELLOW)📊 运行 RAG 模式评估: $(MODE)...$(NC)"
+	mkdir -p evals/reports
+	$(PYTHON) scripts/eval_retrieval.py --mode $(MODE) --k 3 --out evals/reports/retrieval_$(MODE).json
 
 # ============================================================
 # 其他工具

@@ -12,8 +12,9 @@ import os
 
 from app.config import config
 from loguru import logger
-from app.api import chat, health, file, aiops
+from app.api import aiops, chat, file, health, rag
 from app.core.milvus_client import milvus_manager
+from app.services.vector_store_manager import vector_store_manager
 
 
 @asynccontextmanager
@@ -30,6 +31,8 @@ async def lifespan(app: FastAPI):
     logger.info("🔌 正在连接 Milvus...")
     milvus_manager.connect()
     logger.info("✅ Milvus 连接成功")
+    vector_store_manager.initialize()
+    logger.info("✅ VectorStore 初始化成功")
     
     logger.info("=" * 60)
     
@@ -63,6 +66,7 @@ app.include_router(health.router, tags=["健康检查"])
 app.include_router(chat.router, prefix="/api", tags=["对话"])
 app.include_router(file.router, prefix="/api", tags=["文件管理"])
 app.include_router(aiops.router, prefix="/api", tags=["AIOps智能运维"])
+app.include_router(rag.router, prefix="/api", tags=["RAG调试"])
 
 # 挂载静态文件
 static_dir = "static"

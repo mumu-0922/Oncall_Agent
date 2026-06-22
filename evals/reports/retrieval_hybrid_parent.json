@@ -1,0 +1,158 @@
+{
+  "mode": "hybrid_parent",
+  "k": 3,
+  "case_count": 8,
+  "summary": {
+    "hit_rate": 0.875,
+    "recall_at_k": 0.875,
+    "precision_at_k": 0.5833,
+    "mrr": 0.875,
+    "total_latency_ms": 190.13
+  },
+  "cases": [
+    {
+      "id": "cpu_high_usage_diagnosis",
+      "question": "data-sync-service CPU 使用率持续超过 90%，应该如何排查根因并止血？",
+      "expected_sources": [
+        "cpu_high_usage.md"
+      ],
+      "retrieved_sources": [
+        "cpu_high_usage.md",
+        "disk_high_usage.md",
+        "memory_high_usage.md"
+      ],
+      "latency_ms": 185.28,
+      "hit": 1,
+      "recall_at_k": 1.0,
+      "precision_at_k": 0.3333333333333333,
+      "mrr": 1.0,
+      "first_hit_rank": 1
+    },
+    {
+      "id": "memory_leak_diagnosis",
+      "question": "服务内存持续上涨并接近 OOM，OnCall Agent 应该查哪些证据？",
+      "expected_sources": [
+        "memory_high_usage.md"
+      ],
+      "retrieved_sources": [
+        "memory_high_usage.md",
+        "memory_high_usage.md",
+        "memory_high_usage.md"
+      ],
+      "latency_ms": 0.55,
+      "hit": 1,
+      "recall_at_k": 1.0,
+      "precision_at_k": 1.0,
+      "mrr": 1.0,
+      "first_hit_rank": 1
+    },
+    {
+      "id": "disk_usage_diagnosis",
+      "question": "磁盘使用率过高导致服务异常时，应该如何定位和处理？",
+      "expected_sources": [
+        "disk_high_usage.md"
+      ],
+      "retrieved_sources": [
+        "disk_high_usage.md",
+        "service_unavailable.md",
+        "service_unavailable.md"
+      ],
+      "latency_ms": 0.67,
+      "hit": 1,
+      "recall_at_k": 1.0,
+      "precision_at_k": 0.3333333333333333,
+      "mrr": 1.0,
+      "first_hit_rank": 1
+    },
+    {
+      "id": "service_unavailable_runbook",
+      "question": "服务不可用时如何从告警、日志、监控三类证据生成排障报告？",
+      "expected_sources": [
+        "service_unavailable.md"
+      ],
+      "retrieved_sources": [
+        "service_unavailable.md",
+        "service_unavailable.md",
+        "service_unavailable.md"
+      ],
+      "latency_ms": 0.68,
+      "hit": 1,
+      "recall_at_k": 1.0,
+      "precision_at_k": 1.0,
+      "mrr": 1.0,
+      "first_hit_rank": 1
+    },
+    {
+      "id": "slow_response_diagnosis",
+      "question": "接口响应很慢但还没有完全不可用，应该优先检查哪些方向？",
+      "expected_sources": [
+        "slow_response.md"
+      ],
+      "retrieved_sources": [
+        "slow_response.md",
+        "service_unavailable.md",
+        "cpu_high_usage.md"
+      ],
+      "latency_ms": 0.72,
+      "hit": 1,
+      "recall_at_k": 1.0,
+      "precision_at_k": 0.3333333333333333,
+      "mrr": 1.0,
+      "first_hit_rank": 1
+    },
+    {
+      "id": "cpu_with_history_ticket",
+      "question": "CPU 告警排查时为什么要结合历史工单，而不是只看当前监控曲线？",
+      "expected_sources": [
+        "cpu_high_usage.md"
+      ],
+      "retrieved_sources": [
+        "memory_high_usage.md",
+        "service_unavailable.md",
+        "disk_high_usage.md"
+      ],
+      "latency_ms": 0.63,
+      "hit": 0,
+      "recall_at_k": 0.0,
+      "precision_at_k": 0.0,
+      "mrr": 0.0,
+      "first_hit_rank": 0
+    },
+    {
+      "id": "availability_fallback",
+      "question": "如果依赖服务故障导致不可用，系统应该如何降级和恢复？",
+      "expected_sources": [
+        "service_unavailable.md"
+      ],
+      "retrieved_sources": [
+        "service_unavailable.md",
+        "service_unavailable.md",
+        "service_unavailable.md"
+      ],
+      "latency_ms": 0.75,
+      "hit": 1,
+      "recall_at_k": 1.0,
+      "precision_at_k": 1.0,
+      "mrr": 1.0,
+      "first_hit_rank": 1
+    },
+    {
+      "id": "slow_response_degrade",
+      "question": "慢响应场景下什么时候应该限流降级，什么时候应该继续深挖根因？",
+      "expected_sources": [
+        "slow_response.md"
+      ],
+      "retrieved_sources": [
+        "slow_response.md",
+        "slow_response.md",
+        "cpu_high_usage.md"
+      ],
+      "latency_ms": 0.8,
+      "hit": 1,
+      "recall_at_k": 1.0,
+      "precision_at_k": 0.6666666666666666,
+      "mrr": 1.0,
+      "first_hit_rank": 1
+    }
+  ]
+}

@@ -6,7 +6,11 @@ from typing import Any, Dict, Optional
 
 from loguru import logger
 
+from langchain_core.documents import Document
+
 from app.services.document_splitter_service import document_splitter_service
+from app.services.parent_child_splitter_service import parent_child_splitter_service
+from app.services.rag_document_store import rag_document_store
 from app.services.vector_store_manager import vector_store_manager
 
 
@@ -154,14 +158,31 @@ class VectorIndexService:
             # 2. 删除该文件的旧数据（如果存在）
             normalized_path = path.as_posix()
             vector_store_manager.delete_by_source(normalized_path)
+            rag_document_store.delete_by_source(normalized_path)
 
-            # 3. 使用新的文档分割器
-            documents = document_splitter_service.split_document(content, normalized_path)
-            logger.info(f"文档分割完成: {file_path} -> {len(documents)} 个分片")
+            # 3. 保留旧 splitter 作为 dense 兼容链路；新增 parent-child docstore
+            split_result = parent_child_splitter_service.split(content, normalized_path)
+            if split_result.parents or split_result.children:
+                rag_document_store.upsert_documents(split_result.parents, split_result.children)
+                documents = [
+                    Document(page_content=child.content, metadata=child.metadata)
+                    for child in split_result.children
+                ]
+                ids = [child.child_id for child in split_result.children]
+                logger.info(
+                    "Parent-child 文档分割完成: {} -> parents={}, children={}",
+                    file_path,
+                    len(split_result.parents),
+                    len(split_result.children),
+                )
+            else:
+                documents = document_splitter_service.split_document(content, normalized_path)
+                ids = None
+                logger.info(f"文档分割完成: {file_path} -> {len(documents)} 个分片")
 
             # 4. 添加文档到向量存储
             if documents:
-                vector_store_manager.add_documents(documents)
+                vector_store_manager.add_documents(documents, ids=ids)
                 logger.info(f"文件索引完成: {file_path}, 共 {len(documents)} 个分片")
             else:
                 logger.warning(f"文件内容为空或无法分割: {file_path}")

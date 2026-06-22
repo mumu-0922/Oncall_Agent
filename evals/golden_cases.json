@@ -1,0 +1,66 @@
+[
+  {
+    "id": "cpu_high_usage_diagnosis",
+    "question": "data-sync-service CPU 使用率持续超过 90%，应该如何排查根因并止血？",
+    "expected_sources": ["cpu_high_usage.md"],
+    "expected_answer_points": ["确认 CPU 趋势", "定位高 CPU 进程或线程", "查询错误日志", "临时扩容或限流", "给出后续优化建议"],
+    "tags": ["aiops", "cpu", "diagnosis"],
+    "difficulty": "basic"
+  },
+  {
+    "id": "memory_leak_diagnosis",
+    "question": "服务内存持续上涨并接近 OOM，OnCall Agent 应该查哪些证据？",
+    "expected_sources": ["memory_high_usage.md"],
+    "expected_answer_points": ["查看内存趋势", "区分泄漏和流量上涨", "检查 GC 或堆信息", "查询相关日志", "给出重启或扩容止血方案"],
+    "tags": ["aiops", "memory", "oom"],
+    "difficulty": "basic"
+  },
+  {
+    "id": "disk_usage_diagnosis",
+    "question": "磁盘使用率过高导致服务异常时，应该如何定位和处理？",
+    "expected_sources": ["disk_high_usage.md"],
+    "expected_answer_points": ["查看磁盘使用率", "定位大文件或日志目录", "清理可删除文件", "扩容磁盘", "建立日志轮转"],
+    "tags": ["aiops", "disk", "capacity"],
+    "difficulty": "basic"
+  },
+  {
+    "id": "service_unavailable_runbook",
+    "question": "服务不可用时如何从告警、日志、监控三类证据生成排障报告？",
+    "expected_sources": ["service_unavailable.md"],
+    "expected_answer_points": ["确认影响范围", "查询活跃告警", "查看关键错误日志", "分析依赖服务", "给出恢复方案"],
+    "tags": ["aiops", "availability", "report"],
+    "difficulty": "medium"
+  },
+  {
+    "id": "slow_response_diagnosis",
+    "question": "接口响应很慢但还没有完全不可用，应该优先检查哪些方向？",
+    "expected_sources": ["slow_response.md"],
+    "expected_answer_points": ["查看延迟指标", "检查慢查询或下游依赖", "分析流量变化", "查询错误和超时日志", "考虑限流降级"],
+    "tags": ["aiops", "latency", "performance"],
+    "difficulty": "medium"
+  },
+  {
+    "id": "cpu_with_history_ticket",
+    "question": "CPU 告警排查时为什么要结合历史工单，而不是只看当前监控曲线？",
+    "expected_sources": ["cpu_high_usage.md"],
+    "expected_answer_points": ["历史工单提供相似根因", "减少重复排查", "验证当前症状是否复现", "避免仅凭单点指标下结论"],
+    "tags": ["aiops", "history", "evidence"],
+    "difficulty": "medium"
+  },
+  {
+    "id": "availability_fallback",
+    "question": "如果依赖服务故障导致不可用，系统应该如何降级和恢复？",
+    "expected_sources": ["service_unavailable.md"],
+    "expected_answer_points": ["识别依赖故障", "启用降级或熔断", "恢复核心链路", "持续观察指标", "复盘和预案固化"],
+    "tags": ["aiops", "fallback", "resilience"],
+    "difficulty": "medium"
+  },
+  {
+    "id": "slow_response_degrade",
+    "question": "慢响应场景下什么时候应该限流降级，什么时候应该继续深挖根因？",
+    "expected_sources": ["slow_response.md"],
+    "expected_answer_points": ["先看用户影响和错误率", "核心链路优先保住", "高峰期先止血", "稳定后继续定位慢查询或依赖瓶颈"],
+    "tags": ["aiops", "degrade", "decision"],
+    "difficulty": "hard"
+  }
+]

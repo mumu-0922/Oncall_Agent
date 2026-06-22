@@ -3,7 +3,8 @@
 使用 Pydantic Settings 实现类型安全的配置管理
 """
 
-from typing import Dict, Any
+from typing import Any
+
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -37,6 +38,22 @@ class Settings(BaseSettings):
     # RAG 配置
     rag_top_k: int = 3
     rag_model: str = "qwen-max"  # 使用快速响应模型，不带扩展思考
+    rag_context_summary_enabled: bool = True
+    rag_summary_trigger_messages: int = 12
+    rag_summary_keep_messages: int = 6
+    rag_summary_trim_tokens: int = 4000
+    rag_retrieval_mode: str = "dense"  # dense | hybrid | hybrid_parent
+    rag_docstore_dir: str = "data/rag"
+    rag_parent_max_chars: int = 3500
+    rag_child_chunk_size: int = 500
+    rag_child_chunk_overlap: int = 80
+    rag_dense_fetch_k: int = 10
+    rag_bm25_fetch_k: int = 10
+    rag_final_top_k: int = 3
+    rag_dense_weight: float = 0.6
+    rag_bm25_weight: float = 0.4
+    rag_expand_parent: bool = True
+    rag_parent_context_max_chars: int = 2500
 
     # 文档分块配置
     chunk_max_size: int = 800
@@ -49,7 +66,7 @@ class Settings(BaseSettings):
     mcp_monitor_url: str = "http://localhost:8004/mcp"
 
     @property
-    def mcp_servers(self) -> Dict[str, Dict[str, Any]]:
+    def mcp_servers(self) -> dict[str, dict[str, Any]]:
         """获取完整的 MCP 服务器配置"""
         return {
             "cls": {

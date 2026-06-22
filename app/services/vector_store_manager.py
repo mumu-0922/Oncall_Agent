@@ -3,7 +3,7 @@
 from typing import List
 
 from langchain_core.documents import Document
-from langchain_milvus import Milvus
+from langchain_community.vectorstores import Milvus
 from loguru import logger
 
 from app.config import config
@@ -21,14 +21,16 @@ class VectorStoreManager:
         """初始化向量存储管理器"""
         self.vector_store = None
         self.collection_name = COLLECTION_NAME
-        self._initialize_vector_store()
 
     def _initialize_vector_store(self):
         """初始化 Milvus VectorStore"""
+        if self.vector_store is not None:
+            return
+
         try:
             connection_args = {
                 "host": config.milvus_host,
-                "port": config.milvus_port,
+                "port": str(config.milvus_port),
             }
 
             # 创建 LangChain Milvus VectorStore
@@ -54,7 +56,11 @@ class VectorStoreManager:
             logger.error(f"VectorStore 初始化失败: {e}")
             raise
 
-    def add_documents(self, documents: List[Document]) -> List[str]:
+    def initialize(self):
+        """显式初始化 Milvus VectorStore。"""
+        self._initialize_vector_store()
+
+    def add_documents(self, documents: List[Document], ids: List[str] | None = None) -> List[str]:
         """
         批量添加文档到向量存储（自动批量向量化）
 
@@ -69,8 +75,8 @@ class VectorStoreManager:
             import uuid
             start_time = time.time()
             
-            # 为每个文档生成唯一 id（因为 auto_id=False）
-            ids = [str(uuid.uuid4()) for _ in documents]
+            # 为每个文档生成唯一 id（因为 auto_id=False）；parent-child 模式传入 child_id
+            ids = ids or [str(uuid.uuid4()) for _ in documents]
             
             # LangChain Milvus 的 add_documents 会自动调用 embedding_function
             # 并进行批量处理，性能更好
@@ -122,6 +128,7 @@ class VectorStoreManager:
         Returns:
             Milvus: VectorStore 实例
         """
+        self._initialize_vector_store()
         return self.vector_store
 
     def similarity_search(self, query: str, k: int = 3) -> List[Document]:

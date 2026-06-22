@@ -9,7 +9,7 @@
 ## ✨ 核心特性
 
 - 🤖 **智能对话** - LangChain 多轮对话 + 流式输出
-- 📚 **RAG 问答** - 向量检索增强，支持文档上传、自动建立向量索引、自动更新知识库
+- 📚 **RAG 问答** - 支持 dense / hybrid / hybrid_parent 检索，文档上传后自动建立 Milvus child index、parent-child docstore 与 BM25 sparse index
 - 🔧 **AIOps 诊断** - Plan-Execute-Replan 自动故障诊断和根因分析
 - 🌐 **Web 界面** - 现代化 UI，支持多种对话模式：快速问答/流式对话
 - 🔌 **MCP 集成** - 日志查询和监控数据工具接入
@@ -138,6 +138,7 @@ python -c "import requests, os, time; [requests.post('http://localhost:9900/api/
 | AIOps 诊断 | POST | `/api/aiops` | 自动故障诊断（流式） |
 | 文件上传 | POST | `/api/upload` | 上传并索引文档 |
 | 健康检查 | GET | `/api/health` | 服务状态检查 |
+| RAG 调试 | POST | `/api/rag/retrieve_debug` | 返回检索候选、score、channels、parent/child id |
 
 ### 使用示例
 
@@ -152,6 +153,11 @@ curl -X POST "http://localhost:9900/api/chat_stream" \
   -H "Content-Type: application/json" \
   -d '{"Id":"session-123","Question":"你好"}' \
   --no-buffer
+
+# RAG 检索调试：查看 BM25 / dense / rerank 分数
+curl -X POST "http://localhost:9900/api/rag/retrieve_debug" \
+  -H "Content-Type: application/json" \
+  -d '{"query":"CPU 使用率高怎么排查","mode":"hybrid_parent","top_k":3}'
 
 # AIOps 诊断
 curl -X POST "http://localhost:9900/api/aiops" \
@@ -182,7 +188,11 @@ super_biz_agent_py/
 │   │   ├── vector_embedding_service.py     # 向量embedding服务
 │   │   ├── vector_index_service.py         # 向量索引服务
 │   │   ├── vector_search_service.py        # 向量检索服务
-│   │   └── document_splitter_service.py    # 文档分割服务
+│   │   ├── parent_child_splitter_service.py # Parent-child 文档切分
+│   │   ├── bm25_retrieval_service.py       # BM25 sparse 检索
+│   │   ├── hybrid_retrieval_service.py     # Hybrid recall + rerank + parent expansion
+│   │   ├── rag_document_store.py           # Parent/child JSONL docstore
+│   │   └── document_splitter_service.py    # 旧版 dense 兼容 splitter
 │   ├── agent/                              # Agent 模块
 │   │   ├── __init__.py
 │   │   ├── mcp_client.py                   # MCP 客户端（工具调用）
@@ -251,9 +261,48 @@ MILVUS_PORT=19530
 
 # RAG 配置
 RAG_TOP_K=3
-CHUNK_MAX_SIZE=800
+RAG_RETRIEVAL_MODE=dense              # dense | hybrid | hybrid_parent
+RAG_DOCSTORE_DIR=data/rag
+RAG_PARENT_MAX_CHARS=3500
+RAG_CHILD_CHUNK_SIZE=500
+RAG_CHILD_CHUNK_OVERLAP=80
+RAG_DENSE_FETCH_K=10
+RAG_BM25_FETCH_K=10
+RAG_FINAL_TOP_K=3
+RAG_DENSE_WEIGHT=0.6
+RAG_BM25_WEIGHT=0.4
+RAG_EXPAND_PARENT=true
+RAG_PARENT_CONTEXT_MAX_CHARS=2500
+CHUNK_MAX_SIZE=800                    # 旧 splitter 兼容配置
 CHUNK_OVERLAP=100
+
+# 对话上下文摘要配置
+RAG_CONTEXT_SUMMARY_ENABLED=true
+RAG_SUMMARY_TRIGGER_MESSAGES=12
+RAG_SUMMARY_KEEP_MESSAGES=6
+RAG_SUMMARY_TRIM_TOKENS=4000
 ```
+
+
+## 📚 RAG Hybrid Parent-Child
+
+当前 RAG 保留旧 `dense` 模式，同时新增 `hybrid` / `hybrid_parent`：
+
+```text
+文档 -> parent chunks(章节上下文) -> child chunks(500/80 精准召回)
+child -> Milvus dense index + BM25 sparse index
+query -> dense recall + BM25 recall -> score fusion/rerank -> parent expansion -> final topK
+```
+
+关键说明：
+
+- `dense`：旧链路，默认开启，便于回退。
+- `hybrid`：dense + BM25 多路召回，按 `child_id` 合并后规则重排。
+- `hybrid_parent`：在 hybrid 基础上用 `parent_id` 扩展父块上下文，兼顾精准召回和完整答案。
+- Debug API：`POST /api/rag/retrieve_debug` 可直接查看 `dense_score`、`bm25_score`、`rerank_score`、`retrieval_channels`。
+- 评估命令：`make eval-rag MODE=hybrid_parent`，报告输出到 `evals/reports/retrieval_hybrid_parent.json`。
+
+详细设计见 `docs/rag_design.md`，改造计划与过程见 `docs/rag_hybrid_parent_child_plan.md` / `docs/rag_hybrid_parent_child_process.md`。
 
 ## 🎯 AIOps 智能运维
 
