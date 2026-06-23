@@ -1,11 +1,8 @@
-"""RAG Agent 服务 - 基于 LangGraph 的智能代理
-
-使用 langchain_qwq 的 ChatQwen 原生集成，
-支持真正的流式输出和更好的模型适配。
-"""
+"""RAG Agent 服务 - 基于 LangGraph 的智能代理。"""
 
 from collections.abc import AsyncGenerator, Sequence
 from datetime import datetime
+from time import perf_counter
 from typing import Any
 
 from langchain.agents import create_agent
@@ -16,23 +13,21 @@ from langchain_core.messages import (
     HumanMessage,
     SystemMessage,
 )
-from langchain_qwq import ChatQwen
 from langgraph.checkpoint.memory import MemorySaver
 from loguru import logger
 
 from app.agent.mcp_client import get_mcp_client_with_retry
 from app.config import config
+from app.core.llm_factory import llm_factory
+from app.services.chat_trace_service import ChatTraceObserver
 from app.tools import get_current_time, retrieve_knowledge
 
-# 阿里千问大模型和langchain集成参考： https://docs.langchain.com/oss/python/integrations/chat/qwen
-# 注意：需要配置环境变量 DASHSCOPE_API_BASE=https://dashscope.aliyuncs.com/compatible-mode/v1 否则默认访问的是新加坡站点
-# 同时也需要配置环境变量 DASHSCOPE_API_KEY=your_api_key
-
 SUMMARY_MESSAGE_SOURCE = "summarization"
+STREAM_MODES = {"messages", "updates"}
 
 
 class RagAgentService:
-    """RAG Agent 服务 - 使用 LangGraph + ChatQwen 原生集成"""
+    """RAG Agent 服务 - 使用 LangGraph + OpenAI-compatible LLM 工厂。"""
 
     def __init__(
         self,
@@ -47,7 +42,7 @@ class RagAgentService:
             model: 可选的主对话模型，用于测试或自定义注入
             summary_model: 可选的摘要模型，用于测试或自定义注入
         """
-        self.model_name = config.rag_model
+        self.model_name = config.effective_llm_model
         self.streaming = streaming
         self.system_prompt = self._build_system_prompt()
         self.model = model or self._build_chat_model(streaming=streaming, temperature=0.7)
@@ -68,15 +63,15 @@ class RagAgentService:
         self._agent_initialized = False
 
         logger.info(
-            f"RAG Agent 服务初始化完成 (ChatQwen), model={self.model_name}, "
+            f"RAG Agent 服务初始化完成, provider={config.effective_llm_provider}, "
+            f"model={self.model_name}, "
             f"streaming={streaming}, middlewares={len(self.middlewares)}"
         )
 
     def _build_chat_model(self, streaming: bool, temperature: float) -> BaseChatModel:
-        """构建 ChatQwen 模型实例。"""
-        return ChatQwen(
+        """构建 Chat 模型实例。"""
+        return llm_factory.create_chat_model(
             model=self.model_name,
-            api_key=config.dashscope_api_key,
             temperature=temperature,
             streaming=streaming,
         )
@@ -216,45 +211,40 @@ class RagAgentService:
         Returns:
             str: 完整答案
         """
+        result = await self.query_with_trace(question, session_id=session_id)
+        return result["answer"]
+
+    async def query_with_trace(
+        self,
+        question: str,
+        session_id: str,
+    ) -> dict[str, Any]:
+        """非流式处理用户问题，并返回可审计执行轨迹。"""
         try:
             await self._initialize_agent()
 
             logger.info(f"[会话 {session_id}] RAG Agent 收到查询（非流式）: {question}")
-
-            # 构建消息列表（系统提示词由 create_agent 接管）
-            messages = [HumanMessage(content=question)]
-
-            # 构建 Agent 输入
-            agent_input = {"messages": messages}
-
-            # 配置 thread_id（用于会话持久化）
-            config_dict = {
-                "configurable": {
-                    "thread_id": session_id
-                }
-            }
+            started_at = perf_counter()
+            observer = ChatTraceObserver()
+            trace_events = [observer.start_event()]
 
             result = await self.agent.ainvoke(
-                input=agent_input,
-                config=config_dict,
+                input=self._build_agent_input(question),
+                config=self._build_thread_config(session_id),
             )
 
-            # 提取最终答案
             messages_result = result.get("messages", [])
-            if messages_result:
-                last_message = messages_result[-1]
-                answer = last_message.content if hasattr(last_message, 'content') else str(last_message)
+            trace_events.extend(observer.extract_trace_from_messages(messages_result))
+            if not messages_result:
+                logger.warning(f"[会话 {session_id}] Agent 返回结果为空")
+                trace_events.append(self._empty_trace_event(observer, started_at))
+                return {"answer": "", "trace": trace_events}
 
-                # 记录工具调用
-                if hasattr(last_message, "tool_calls") and last_message.tool_calls:
-                    tool_names = [tc.get("name", "unknown") for tc in last_message.tool_calls]
-                    logger.info(f"[会话 {session_id}] Agent 调用了工具: {tool_names}")
-
-                logger.info(f"[会话 {session_id}] RAG Agent 查询完成（非流式）")
-                return answer
-
-            logger.warning(f"[会话 {session_id}] Agent 返回结果为空")
-            return ""
+            answer = self._extract_final_answer(messages_result[-1])
+            self._log_final_tool_calls(messages_result[-1], session_id=session_id)
+            trace_events.append(self._complete_trace_event(observer, started_at))
+            logger.info(f"[会话 {session_id}] RAG Agent 查询完成（非流式）")
+            return {"answer": answer, "trace": trace_events}
 
         except Exception as e:
             logger.error(
@@ -285,44 +275,41 @@ class RagAgentService:
             await self._initialize_agent()
 
             logger.info(f"[会话 {session_id}] RAG Agent 收到查询（流式）: {question}")
+            started_at = perf_counter()
+            full_response = ""
+            trace_events: list[dict[str, Any]] = []
+            observer = ChatTraceObserver()
 
-            # 构建消息列表（系统提示词由 create_agent 接管）
-            messages = [HumanMessage(content=question)]
+            start_event = observer.start_event()
+            trace_events.append(start_event)
+            yield {"type": "trace", "data": start_event}
 
-            # 构建 Agent 输入
-            agent_input = {"messages": messages}
-
-            # 配置 thread_id（用于会话持久化）
-            config_dict = {
-                "configurable": {
-                    "thread_id": session_id
-                }
-            }
-
-            async for token, metadata in self.agent.astream(
-                input=agent_input,
-                config=config_dict,
-                stream_mode="messages",
+            async for stream_item in self.agent.astream(
+                input=self._build_agent_input(question),
+                config=self._build_thread_config(session_id),
+                stream_mode=["messages", "updates"],
             ):
-                node_name = metadata.get('langgraph_node', 'unknown') if isinstance(metadata, dict) else 'unknown'
-                message_type = type(token).__name__
+                stream_mode, payload = self._normalize_stream_item(stream_item)
+                if stream_mode != "messages":
+                    async for event_chunk in self._stream_update_trace(
+                        payload, observer, trace_events
+                    ):
+                        yield event_chunk
+                    continue
 
-                if message_type in ("AIMessage", "AIMessageChunk"):
-                    content_blocks = getattr(token, 'content_blocks', None)
-
-                    if content_blocks and isinstance(content_blocks, list):
-                        for block in content_blocks:
-                            if isinstance(block, dict) and block.get('type') == 'text':
-                                text_content = block.get('text', '')
-                                if text_content:
-                                    yield {
-                                        "type": "content",
-                                        "data": text_content,
-                                        "node": node_name
-                                    }
+                token, metadata = self._split_message_payload(payload)
+                async for chunk in self._stream_message_trace_and_content(
+                    token, metadata, observer, trace_events
+                ):
+                    if chunk["type"] == "content":
+                        full_response += chunk["data"]
+                    yield chunk
 
             logger.info(f"[会话 {session_id}] RAG Agent 查询完成（流式）")
-            yield {"type": "complete"}
+            async for chunk in self._stream_complete_chunks(
+                full_response, observer, trace_events, started_at
+            ):
+                yield chunk
 
         except Exception as e:
             logger.error(
@@ -330,11 +317,98 @@ class RagAgentService:
                 session_id,
                 self._format_exception(e),
             )
-            yield {
-                "type": "error",
-                "data": self._format_exception(e)
-            }
+            yield self._error_chunk(e)
             raise
+
+    def _build_agent_input(self, question: str) -> dict[str, list[HumanMessage]]:
+        """构建 Agent 输入；系统提示词由 create_agent 接管。"""
+        return {"messages": [HumanMessage(content=question)]}
+
+    def _build_thread_config(self, session_id: str) -> dict[str, dict[str, str]]:
+        """配置 thread_id，用于 LangGraph 会话持久化。"""
+        return {"configurable": {"thread_id": session_id}}
+
+    def _extract_final_answer(self, message: BaseMessage) -> str:
+        content = message.content if hasattr(message, "content") else str(message)
+        return content if isinstance(content, str) else str(content)
+
+    def _log_final_tool_calls(self, message: BaseMessage, *, session_id: str) -> None:
+        tool_calls = getattr(message, "tool_calls", None)
+        if not tool_calls:
+            return
+        tool_names = [tc.get("name", "unknown") for tc in tool_calls]
+        logger.info(f"[会话 {session_id}] Agent 调用了工具: {tool_names}")
+
+    def _complete_trace_event(
+        self, observer: ChatTraceObserver, started_at: float
+    ) -> dict[str, Any]:
+        return observer.complete_event(round((perf_counter() - started_at) * 1000))
+
+    def _empty_trace_event(self, observer: ChatTraceObserver, started_at: float) -> dict[str, Any]:
+        return observer.empty_result_event(round((perf_counter() - started_at) * 1000))
+
+    def _normalize_stream_item(self, stream_item: Any) -> tuple[str, Any]:
+        if (
+            isinstance(stream_item, tuple)
+            and len(stream_item) == 2
+            and stream_item[0] in STREAM_MODES
+        ):
+            return stream_item
+        return "messages", stream_item
+
+    def _split_message_payload(self, payload: Any) -> tuple[Any, dict[str, Any]]:
+        if isinstance(payload, tuple) and len(payload) == 2:
+            token, metadata = payload
+            return token, metadata if isinstance(metadata, dict) else {}
+        return payload, {}
+
+    async def _stream_update_trace(
+        self,
+        payload: Any,
+        observer: ChatTraceObserver,
+        trace_events: list[dict[str, Any]],
+    ) -> AsyncGenerator[dict[str, Any], None]:
+        for event in observer.events_from_update(payload):
+            trace_events.append(event)
+            yield {"type": "trace", "data": event}
+
+    async def _stream_message_trace_and_content(
+        self,
+        token: Any,
+        metadata: dict[str, Any],
+        observer: ChatTraceObserver,
+        trace_events: list[dict[str, Any]],
+    ) -> AsyncGenerator[dict[str, Any], None]:
+        node_name = metadata.get("langgraph_node", "unknown")
+        for event in observer.events_from_message(token, node_name=node_name):
+            trace_events.append(event)
+            yield {"type": "trace", "data": event}
+
+        text_content = observer.extract_ai_text(token)
+        if text_content:
+            yield {"type": "content", "data": text_content, "node": node_name}
+
+    async def _stream_complete_chunks(
+        self,
+        full_response: str,
+        observer: ChatTraceObserver,
+        trace_events: list[dict[str, Any]],
+        started_at: float,
+    ) -> AsyncGenerator[dict[str, Any], None]:
+        complete_event = self._complete_trace_event(observer, started_at)
+        trace_events.append(complete_event)
+        yield {"type": "trace", "data": complete_event}
+        yield {
+            "type": "complete",
+            "data": {
+                "answer": full_response,
+                "trace": trace_events,
+                "duration_ms": complete_event.get("duration_ms"),
+            },
+        }
+
+    def _error_chunk(self, error: BaseException) -> dict[str, str]:
+        return {"type": "error", "data": self._format_exception(error)}
 
     @staticmethod
     def _is_summary_message(message: BaseMessage) -> bool:
@@ -437,4 +511,4 @@ class RagAgentService:
 
 
 # 全局单例 - 启用流式输出
-rag_agent_service = RagAgentService(streaming=True)
+rag_agent_service = RagAgentService(streaming=config.llm_streaming)

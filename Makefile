@@ -13,6 +13,10 @@ PYTHON ?= .venv/bin/python
 MODE ?= local
 FRONTEND_DIR = frontend
 WEB_URL = http://localhost:5173
+MCP_CLS_PATTERN = [m]cp_servers/cls_server.py
+MCP_MONITOR_PATTERN = [m]cp_servers/monitor_server.py
+MCP_CLS_CMD_PATTERN = [.]venv/bin/python[[:space:]]+mcp_servers/cls_server.py
+MCP_MONITOR_CMD_PATTERN = [.]venv/bin/python[[:space:]]+mcp_servers/monitor_server.py
 
 # 颜色输出
 GREEN = \033[0;32m
@@ -222,14 +226,16 @@ status:
 # 启动 CLS MCP 服务
 start-cls:
 	@echo "$(YELLOW)📋 启动 CLS MCP 服务...$(NC)"
-	@if pgrep -f "mcp_servers/cls_server.py" > /dev/null 2>&1; then \
+	@if [ -f mcp_cls.pid ] && pid=$$(cat mcp_cls.pid) && ps -p $$pid -o args= 2>/dev/null | grep -q "mcp_servers/cls_server.py"; then \
 		echo "$(GREEN)✅ CLS MCP 服务已经在运行中$(NC)"; \
 	else \
+		rm -f mcp_cls.pid; \
 		echo "$(YELLOW)📦 正在启动 CLS MCP 服务（后台运行）...$(NC)"; \
-		nohup .venv/bin/python mcp_servers/cls_server.py > mcp_cls.log 2>&1 & \
+		setsid .venv/bin/python mcp_servers/cls_server.py > mcp_cls.log 2>&1 < /dev/null & \
 		echo $$! > mcp_cls.pid; \
 		sleep 2; \
-		if pgrep -f "mcp_servers/cls_server.py" > /dev/null 2>&1; then \
+		pid=$$(cat mcp_cls.pid); \
+		if ps -p $$pid -o args= 2>/dev/null | grep -q "mcp_servers/cls_server.py"; then \
 			echo "$(GREEN)✅ CLS MCP 服务启动成功$(NC)"; \
 			echo "$(YELLOW)   PID: $$(cat mcp_cls.pid)$(NC)"; \
 			echo "$(YELLOW)   URL: http://127.0.0.1:8003/mcp$(NC)"; \
@@ -243,14 +249,16 @@ start-cls:
 # 启动 Monitor MCP 服务
 start-monitor:
 	@echo "$(YELLOW)📊 启动 Monitor MCP 服务...$(NC)"
-	@if pgrep -f "mcp_servers/monitor_server.py" > /dev/null 2>&1; then \
+	@if [ -f mcp_monitor.pid ] && pid=$$(cat mcp_monitor.pid) && ps -p $$pid -o args= 2>/dev/null | grep -q "mcp_servers/monitor_server.py"; then \
 		echo "$(GREEN)✅ Monitor MCP 服务已经在运行中$(NC)"; \
 	else \
+		rm -f mcp_monitor.pid; \
 		echo "$(YELLOW)📦 正在启动 Monitor MCP 服务（后台运行）...$(NC)"; \
-		nohup .venv/bin/python mcp_servers/monitor_server.py > mcp_monitor.log 2>&1 & \
+		setsid .venv/bin/python mcp_servers/monitor_server.py > mcp_monitor.log 2>&1 < /dev/null & \
 		echo $$! > mcp_monitor.pid; \
 		sleep 2; \
-		if pgrep -f "mcp_servers/monitor_server.py" > /dev/null 2>&1; then \
+		pid=$$(cat mcp_monitor.pid); \
+		if ps -p $$pid -o args= 2>/dev/null | grep -q "mcp_servers/monitor_server.py"; then \
 			echo "$(GREEN)✅ Monitor MCP 服务启动成功$(NC)"; \
 			echo "$(YELLOW)   PID: $$(cat mcp_monitor.pid)$(NC)"; \
 			echo "$(YELLOW)   URL: http://127.0.0.1:8004/mcp$(NC)"; \
@@ -275,7 +283,7 @@ stop-monitor:
 		rm -f mcp_monitor.pid; \
 	else \
 		echo "$(YELLOW)⚠️  未找到 mcp_monitor.pid 文件$(NC)"; \
-		pkill -f "mcp_servers/monitor_server.py" 2>/dev/null && \
+		pkill -f "$(MCP_MONITOR_CMD_PATTERN)" 2>/dev/null && \
 			echo "$(GREEN)✅ 已停止所有 Monitor MCP 进程$(NC)" || \
 			echo "$(YELLOW)⚠️  没有运行中的 Monitor MCP 进程$(NC)"; \
 	fi
@@ -285,27 +293,31 @@ status-mcp:
 	@echo "$(YELLOW)📊 MCP 服务状态:$(NC)"
 	@echo ""
 	@echo "$(CYAN)CLS MCP 服务:$(NC)"
-	@if pgrep -f "mcp_servers/cls_server.py" > /dev/null 2>&1; then \
-		pid=$$(pgrep -f "mcp_servers/cls_server.py"); \
+	@if [ -f mcp_cls.pid ] && pid=$$(cat mcp_cls.pid) && ps -p $$pid -o args= 2>/dev/null | grep -q "mcp_servers/cls_server.py"; then \
 		echo "  状态: $(GREEN)运行中$(NC)"; \
 		echo "  PID: $$pid"; \
 		echo "  URL: http://127.0.0.1:8003/mcp"; \
-		curl -s http://127.0.0.1:8003/mcp > /dev/null 2>&1 && \
-			echo "  连接: $(GREEN)✅ 正常$(NC)" || \
+		code=$$(curl -s -o /dev/null -w "%{http_code}" --max-time 2 http://127.0.0.1:8003/mcp || true); \
+		if [ "$$code" != "000" ]; then \
+			echo "  连接: $(GREEN)✅ 正常$(NC) (HTTP $$code)"; \
+		else \
 			echo "  连接: $(RED)❌ 无法连接$(NC)"; \
+		fi; \
 	else \
 		echo "  状态: $(RED)未运行$(NC)"; \
 	fi
 	@echo ""
 	@echo "$(CYAN)Monitor MCP 服务:$(NC)"
-	@if pgrep -f "mcp_servers/monitor_server.py" > /dev/null 2>&1; then \
-		pid=$$(pgrep -f "mcp_servers/monitor_server.py"); \
+	@if [ -f mcp_monitor.pid ] && pid=$$(cat mcp_monitor.pid) && ps -p $$pid -o args= 2>/dev/null | grep -q "mcp_servers/monitor_server.py"; then \
 		echo "  状态: $(GREEN)运行中$(NC)"; \
 		echo "  PID: $$pid"; \
 		echo "  URL: http://127.0.0.1:8004/mcp"; \
-		curl -s http://127.0.0.1:8004/mcp > /dev/null 2>&1 && \
-			echo "  连接: $(GREEN)✅ 正常$(NC)" || \
+		code=$$(curl -s -o /dev/null -w "%{http_code}" --max-time 2 http://127.0.0.1:8004/mcp || true); \
+		if [ "$$code" != "000" ]; then \
+			echo "  连接: $(GREEN)✅ 正常$(NC) (HTTP $$code)"; \
+		else \
 			echo "  连接: $(RED)❌ 无法连接$(NC)"; \
+		fi; \
 	else \
 		echo "  状态: $(RED)未运行$(NC)"; \
 	fi
@@ -342,9 +354,21 @@ start-api:
 		echo "$(GREEN)✅ FastAPI 服务已经在运行中 ($(SERVER_URL))$(NC)"; \
 	else \
 		echo "$(YELLOW)📦 正在启动 FastAPI 服务（后台运行）...$(NC)"; \
-		nohup .venv/bin/python -m uvicorn app.main:app --host 127.0.0.1 --port 9900 > server.log 2>&1 & \
+		setsid .venv/bin/python -m uvicorn app.main:app --host 127.0.0.1 --port 9900 > server.log 2>&1 < /dev/null & \
 		echo $$! > server.pid; \
-		echo "$(GREEN)✅ FastAPI 服务启动命令已执行$(NC)"; \
+		sleep 2; \
+		pid=$$(cat server.pid); \
+		if ! ps -p $$pid -o args= 2>/dev/null | grep -q "uvicorn app.main:app"; then \
+			echo "$(RED)❌ FastAPI 启动失败或已退出$(NC)"; \
+			echo "$(YELLOW)请检查日志: tail -n 80 server.log$(NC)"; \
+			exit 1; \
+		fi; \
+		code=$$(curl -s -o /dev/null -w "%{http_code}" --max-time 2 $(HEALTH_CHECK_API) || true); \
+		if [ "$$code" = "200" ]; then \
+			echo "$(GREEN)✅ FastAPI 服务已就绪$(NC)"; \
+		else \
+			echo "$(YELLOW)⚠️  FastAPI 进程已启动，但健康检查暂未返回 200 (HTTP $$code)，可继续执行 make wait$(NC)"; \
+		fi; \
 		echo "$(YELLOW)   PID: $$(cat server.pid)$(NC)"; \
 		echo "$(YELLOW)   URL: $(SERVER_URL)$(NC)"; \
 		echo "$(YELLOW)   日志: server.log$(NC)"; \
@@ -380,7 +404,7 @@ stop-cls:
 		rm -f mcp_cls.pid; \
 	else \
 		echo "$(YELLOW)⚠️  未找到 mcp_cls.pid 文件$(NC)"; \
-		pkill -f "mcp_servers/cls_server.py" 2>/dev/null && \
+		pkill -f "$(MCP_CLS_CMD_PATTERN)" 2>/dev/null && \
 			echo "$(GREEN)✅ 已停止所有 CLS MCP 进程$(NC)" || \
 			echo "$(YELLOW)⚠️  没有运行中的 CLS MCP 进程$(NC)"; \
 	fi
@@ -399,7 +423,7 @@ stop-api:
 		rm -f server.pid; \
 	else \
 		echo "$(YELLOW)⚠️  未找到 server.pid 文件$(NC)"; \
-		pkill -f "uvicorn app.main:app" 2>/dev/null && \
+		pkill -f "[u]vicorn app.main:app" 2>/dev/null && \
 			echo "$(GREEN)✅ 已停止所有 uvicorn 进程$(NC)" || \
 			echo "$(YELLOW)⚠️  没有运行中的 uvicorn 进程$(NC)"; \
 	fi

@@ -4,7 +4,7 @@ import types
 
 import pytest
 from langchain_core.language_models.chat_models import SimpleChatModel
-from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 from langgraph.graph.message import REMOVE_ALL_MESSAGES
 
 
@@ -134,3 +134,117 @@ async def test_query_only_sends_latest_human_message(monkeypatch: pytest.MonkeyP
     assert answer == "ok"
     assert len(dummy_agent.last_input["messages"]) == 1
     assert isinstance(dummy_agent.last_input["messages"][0], HumanMessage)
+
+
+@pytest.mark.asyncio
+async def test_query_with_trace_returns_sanitized_tool_events(monkeypatch: pytest.MonkeyPatch):
+    module = load_rag_agent_module(monkeypatch)
+    service = module.RagAgentService(
+        streaming=False,
+        model=FakeChatModel(),
+        summary_model=FakeChatModel(),
+    )
+
+    class DummyAgent:
+        async def ainvoke(self, input, config):
+            return {
+                "messages": [
+                    AIMessage(
+                        content="",
+                        tool_calls=[
+                            {
+                                "name": "retrieve_knowledge",
+                                "args": {"query": "CPU", "api_key": "sk-secretsecret"},
+                                "id": "call-1",
+                            }
+                        ],
+                    ),
+                    ToolMessage(
+                        content="【参考资料 1】\n来源: runbook.md\n内容:\nCPU 排查",
+                        name="retrieve_knowledge",
+                        tool_call_id="call-1",
+                    ),
+                    AIMessage(content="根据 runbook 排查 CPU。"),
+                ]
+            }
+
+    async def noop():
+        return None
+
+    service.agent = DummyAgent()
+    service._initialize_agent = noop
+
+    result = await service.query_with_trace("CPU 怎么排查", session_id="session-trace")
+
+    assert result["answer"] == "根据 runbook 排查 CPU。"
+    assert [event["kind"] for event in result["trace"]].count("tool_call") == 1
+    assert [event["kind"] for event in result["trace"]].count("tool_result") == 1
+    tool_call = next(event for event in result["trace"] if event["kind"] == "tool_call")
+    assert tool_call["args"]["api_key"] == "***REDACTED***"
+    tool_result = next(event for event in result["trace"] if event["kind"] == "tool_result")
+    assert tool_result["metadata"]["documents"] == 1
+    assert tool_result["metadata"]["sources"] == ["runbook.md"]
+
+
+@pytest.mark.asyncio
+async def test_query_stream_emits_trace_and_content(monkeypatch: pytest.MonkeyPatch):
+    module = load_rag_agent_module(monkeypatch)
+    service = module.RagAgentService(
+        streaming=True,
+        model=FakeChatModel(),
+        summary_model=FakeChatModel(),
+    )
+
+    class DummyAgent:
+        async def astream(self, input, config, stream_mode):
+            assert stream_mode == ["messages", "updates"]
+            yield (
+                "updates",
+                {
+                    "model": {
+                        "messages": [
+                            AIMessage(
+                                content="",
+                                tool_calls=[
+                                    {
+                                        "name": "get_current_time",
+                                        "args": {"timezone": "Asia/Shanghai"},
+                                        "id": "call-time",
+                                    }
+                                ],
+                            )
+                        ]
+                    }
+                },
+            )
+            yield (
+                "updates",
+                {
+                    "tools": {
+                        "messages": [
+                            ToolMessage(
+                                content="2026-06-23 12:00:00",
+                                name="get_current_time",
+                                tool_call_id="call-time",
+                            )
+                        ]
+                    }
+                },
+            )
+            yield ("messages", (AIMessage(content="现在是中午。"), {"langgraph_node": "model"}))
+
+    async def noop():
+        return None
+
+    service.agent = DummyAgent()
+    service._initialize_agent = noop
+
+    chunks = [chunk async for chunk in service.query_stream("现在几点", session_id="session-stream")]
+
+    trace_events = [chunk["data"] for chunk in chunks if chunk["type"] == "trace"]
+    assert any(event["kind"] == "tool_call" and event["tool"] == "get_current_time" for event in trace_events)
+    assert any(event["kind"] == "tool_result" and event["status"] == "completed" for event in trace_events)
+    assert any(chunk["type"] == "content" and chunk["data"] == "现在是中午。" for chunk in chunks)
+    done = chunks[-1]
+    assert done["type"] == "complete"
+    assert done["data"]["answer"] == "现在是中午。"

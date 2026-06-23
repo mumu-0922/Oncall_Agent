@@ -51,20 +51,24 @@ async def lifespan(app: FastAPI):
     logger.info(f"🌐 监听地址: http://{config.host}:{config.port}")
     logger.info(f"📚 API 文档: http://{config.host}:{config.port}/docs")
 
-    # 连接 Milvus
-    logger.info("🔌 正在连接 Milvus...")
-    milvus_manager.connect()
-    logger.info("✅ Milvus 连接成功")
-    vector_store_manager.initialize()
-    logger.info("✅ VectorStore 初始化成功")
+    # 连接 Milvus：embedding disabled 时允许 BM25-only RAG，不强制依赖向量库。
+    if config.is_embedding_enabled:
+        logger.info("🔌 正在连接 Milvus...")
+        milvus_manager.connect()
+        logger.info("✅ Milvus 连接成功")
+        vector_store_manager.initialize()
+        logger.info("✅ VectorStore 初始化成功")
+    else:
+        logger.warning("⚠️ Embedding 未启用，跳过 Milvus/VectorStore；RAG 使用 BM25-only 降级")
 
     logger.info("=" * 60)
 
     yield
 
     # 关闭时执行
-    logger.info("🔌 正在关闭 Milvus 连接...")
-    milvus_manager.close()
+    if config.is_embedding_enabled:
+        logger.info("🔌 正在关闭 Milvus 连接...")
+        milvus_manager.close()
     logger.info(f"👋 {config.app_name} 关闭")
 
 

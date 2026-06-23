@@ -2,15 +2,16 @@
 
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, Optional
-
-from loguru import logger
+from typing import Any
 
 from langchain_core.documents import Document
+from loguru import logger
 
+from app.services.bm25_retrieval_service import bm25_retrieval_service
 from app.services.document_splitter_service import document_splitter_service
 from app.services.parent_child_splitter_service import parent_child_splitter_service
 from app.services.rag_document_store import rag_document_store
+from app.services.vector_embedding_service import EmbeddingDisabledError
 from app.services.vector_store_manager import vector_store_manager
 
 
@@ -23,10 +24,10 @@ class IndexingResult:
         self.total_files = 0
         self.success_count = 0
         self.fail_count = 0
-        self.start_time: Optional[datetime] = None
-        self.end_time: Optional[datetime] = None
+        self.start_time: datetime | None = None
+        self.end_time: datetime | None = None
         self.error_message = ""
-        self.failed_files: Dict[str, str] = {}
+        self.failed_files: dict[str, str] = {}
 
     def increment_success_count(self):
         """增加成功计数"""
@@ -46,7 +47,7 @@ class IndexingResult:
             return int((self.end_time - self.start_time).total_seconds() * 1000)
         return 0
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         """转换为字典"""
         return {
             "success": self.success,
@@ -68,7 +69,7 @@ class VectorIndexService:
         self.upload_path = "./uploads"
         logger.info("向量索引服务初始化完成")
 
-    def index_directory(self, directory_path: Optional[str] = None) -> IndexingResult:
+    def index_directory(self, directory_path: str | None = None) -> IndexingResult:
         """
         索引指定目录下的所有文件
 
@@ -164,6 +165,7 @@ class VectorIndexService:
             split_result = parent_child_splitter_service.split(content, normalized_path)
             if split_result.parents or split_result.children:
                 rag_document_store.upsert_documents(split_result.parents, split_result.children)
+                bm25_retrieval_service.rebuild_index()
                 documents = [
                     Document(page_content=child.content, metadata=child.metadata)
                     for child in split_result.children
@@ -182,8 +184,19 @@ class VectorIndexService:
 
             # 4. 添加文档到向量存储
             if documents:
-                vector_store_manager.add_documents(documents, ids=ids)
-                logger.info(f"文件索引完成: {file_path}, 共 {len(documents)} 个分片")
+                try:
+                    vector_store_manager.add_documents(documents, ids=ids)
+                    logger.info(f"文件索引完成: {file_path}, 共 {len(documents)} 个分片")
+                except EmbeddingDisabledError as dense_skip:
+                    logger.warning(
+                        "Dense 向量索引跳过: {}；docstore/BM25 已完成，可用 hybrid_parent BM25-only 检索",
+                        dense_skip,
+                    )
+                except Exception as dense_error:
+                    logger.warning(
+                        "Dense 向量索引失败但不阻断上传: {}；docstore/BM25 已完成，可用 hybrid_parent 降级",
+                        dense_error,
+                    )
             else:
                 logger.warning(f"文件内容为空或无法分割: {file_path}")
 

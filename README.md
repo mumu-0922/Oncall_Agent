@@ -18,15 +18,17 @@
 
 - **框架**: FastAPI + LangChain + LangGraph
 - **前端**: Vite 开发态分离，`npm run build` 输出 `static/` 后由 FastAPI 托管
-- **LLM**: 阿里云 DashScope (通义千问)
-- **向量库**: Milvus
+- **LLM**: OpenAI-compatible Provider Factory（支持 GPT 中转 / DashScope / OpenAI / 本地兼容端点）
+- **Embedding / 检索**: Embedding 可选，支持 dense Milvus 或 BM25-only 降级
+- **向量库**: Milvus（embedding disabled 时非必需）
 - **工具协议**: MCP (Model Context Protocol)
 
 ## 🚀 快速开始
 
 ### 环境要求
 - Python 3.10+
-- 阿里云 DashScope API Key ([获取地址](https://dashscope.aliyun.com/))
+- Chat LLM Key：支持 OpenAI-compatible 中转、OpenAI、DashScope。
+- Embedding Key：可选；没有 embedding 时设 `EMBEDDING_PROVIDER=disabled`，RAG 会走 BM25-only + parent-child 降级。
 
 ### 安装和启动
 
@@ -48,7 +50,8 @@ uv pip install -e .
 pip install -e .
 
 # 3. 编辑配置文件
-# 首次使用需要编辑 .env 文件，填入你的 DASHSCOPE_API_KEY
+# 有 GPT 中转但没有 embedding 时，填 LLM_*，并设置 EMBEDDING_PROVIDER=disabled
+cp .env.example .env
 vim .env  # 或使用其他编辑器
 
 # 4. 单端口演示（Milvus + MCP + FastAPI 托管 static 前端 + 上传文档）
@@ -83,7 +86,8 @@ python -m venv .venv
 pip install -e .
 
 # 3. 编辑配置文件
-# 使用记事本或其他编辑器打开 .env 文件，填入你的 DASHSCOPE_API_KEY
+# 使用记事本或其他编辑器打开 .env 文件；有 GPT 中转则填 LLM_*，无 embedding 则设 EMBEDDING_PROVIDER=disabled
+copy .env.example .env
 notepad .env
 
 # 4. 启动 Docker Desktop
@@ -274,42 +278,63 @@ super_biz_agent_py/
 
 ## ⚙️ 配置说明
 
-通过 `.env` 文件配置：
+通过 `.env` 文件配置。当前推荐先用 **GPT 中转 + 无 embedding 降级**：
 
 ```bash
-# 阿里云LLM DashScope 配置（必填）
-# 秘钥管理： https://bailian.console.aliyun.com/cn-beijing/?spm=5176.29597918.J_SEsSjsNv72yRuRFS2VknO.2.61ac133ccTVQLw&tab=demohouse#/api-key
-DASHSCOPE_API_KEY=your-api-key （配置你自己的秘钥）
-DASHSCOPE_API_BASE=https://dashscope.aliyuncs.com/compatible-mode/v1  # 不配置则默认会使用新加坡站点
-DASHSCOPE_MODEL=qwen-max
+# Chat LLM：OpenAI-compatible 中转 / GPT 网关
+LLM_PROVIDER=openai_compatible
+LLM_API_BASE=https://你的中转地址/v1
+LLM_API_KEY=你的中转key
+LLM_MODEL=你的模型名
 
-# Milvus 配置
-MILVUS_HOST=localhost
-MILVUS_PORT=19530
-
-# RAG 配置
-RAG_TOP_K=3
-RAG_RETRIEVAL_MODE=dense              # dense | hybrid | hybrid_parent
-RAG_DOCSTORE_DIR=data/rag
-RAG_PARENT_MAX_CHARS=3500
-RAG_CHILD_CHUNK_SIZE=500
-RAG_CHILD_CHUNK_OVERLAP=80
-RAG_DENSE_FETCH_K=10
-RAG_BM25_FETCH_K=10
-RAG_FINAL_TOP_K=3
-RAG_DENSE_WEIGHT=0.6
-RAG_BM25_WEIGHT=0.4
-RAG_EXPAND_PARENT=true
-RAG_PARENT_CONTEXT_MAX_CHARS=2500
-CHUNK_MAX_SIZE=800                    # 旧 splitter 兼容配置
-CHUNK_OVERLAP=100
-
-# 对话上下文摘要配置
-RAG_CONTEXT_SUMMARY_ENABLED=true
-RAG_SUMMARY_TRIGGER_MESSAGES=12
-RAG_SUMMARY_KEEP_MESSAGES=6
-RAG_SUMMARY_TRIM_TOKENS=4000
+# 没有 embedding key 时：关闭 dense embedding，RAG 走 BM25-only + parent-child
+EMBEDDING_PROVIDER=disabled
+RAG_RETRIEVAL_MODE=hybrid_parent
 ```
+
+如果有 DashScope 全家桶：
+
+```bash
+LLM_PROVIDER=dashscope
+LLM_API_BASE=https://dashscope.aliyuncs.com/compatible-mode/v1
+LLM_API_KEY=你的 DashScope key
+LLM_MODEL=qwen-max
+
+EMBEDDING_PROVIDER=dashscope
+EMBEDDING_API_KEY=你的 DashScope key
+EMBEDDING_API_BASE=https://dashscope.aliyuncs.com/compatible-mode/v1
+EMBEDDING_MODEL=text-embedding-v4
+EMBEDDING_DIMENSIONS=1024
+RAG_RETRIEVAL_MODE=hybrid_parent
+```
+
+如果以后有 OpenAI embedding：
+
+```bash
+EMBEDDING_PROVIDER=openai
+EMBEDDING_API_KEY=你的 OpenAI key
+EMBEDDING_API_BASE=https://api.openai.com/v1
+EMBEDDING_MODEL=text-embedding-3-small
+EMBEDDING_DIMENSIONS=1536
+```
+
+注意：`EMBEDDING_DIMENSIONS` 必须和 Milvus collection 维度一致；切换 embedding 维度前建议重建 collection 或全量重传文档。
+
+AIOps 诊断是证据驱动链路，默认 **不降级**：
+
+```bash
+AIOPS_STRUCTURED_OUTPUT_METHOD=function_calling
+AIOPS_REQUIRE_TOOL_CALL=true
+AIOPS_TOOL_CALL_MAX_ROUNDS=3
+MCP_CLS_URL=http://localhost:8003/mcp
+MCP_MONITOR_URL=http://localhost:8004/mcp
+```
+
+这意味着：
+
+- MCP 服务不可用：`/api/aiops` 直接返回 error，不生成假诊断。
+- 模型/中转不支持 `structured output`：Planner/Replanner/Report 直接失败。
+- 模型/中转不支持 `tool calling` 或不产生 `tool_calls`：Executor 直接失败。
 
 
 ## 📚 RAG Hybrid Parent-Child
@@ -324,9 +349,9 @@ query -> dense recall + BM25 recall -> score fusion/rerank -> parent expansion -
 
 关键说明：
 
-- `dense`：旧链路，默认开启，便于回退。
+- `dense`：纯向量链路，需要 embedding + Milvus。
 - `hybrid`：dense + BM25 多路召回，按 `child_id` 合并后规则重排。
-- `hybrid_parent`：在 hybrid 基础上用 `parent_id` 扩展父块上下文，兼顾精准召回和完整答案。
+- `hybrid_parent`：在 hybrid 基础上用 `parent_id` 扩展父块上下文，兼顾精准召回和完整答案；当 `EMBEDDING_PROVIDER=disabled` 时会自然降级为 BM25-only + parent expansion。
 - Debug API：`POST /api/rag/retrieve_debug` 可直接查看 `dense_score`、`bm25_score`、`rerank_score`、`retrieval_channels`。
 - 评估命令：`make eval-rag MODE=hybrid_parent`，报告输出到 `evals/reports/retrieval_hybrid_parent.json`。
 
@@ -337,17 +362,20 @@ query -> dense recall + BM25 recall -> score fusion/rerank -> parent expansion -
 基于 **Plan-Execute-Replan** 模式实现自动故障诊断。
 
 ### 核心特性
-- ✅ 自动制定诊断计划（Planner）
-- ✅ 智能工具调用（Executor）
-- ✅ 动态调整步骤（Replanner）
+- ✅ 自动制定诊断计划（Planner）：使用 `with_structured_output(Plan)`，不再生成默认假计划
+- ✅ 智能工具调用（Executor）：模型必须产生 `tool_calls`，并真实调用 CLS/Monitor MCP 工具
+- ✅ 动态调整步骤（Replanner）：使用 `with_structured_output(Act)`，失败时显式报错
 - ✅ 流式输出诊断过程
-- ✅ 生成结构化报告
+- ✅ 生成结构化报告：最终响应来自工具证据，无证据不出报告
 
 ### 快速测试
 
 ```bash
-# 服务已通过 make init 自动启动
-# 如需重启服务：make restart
+# 先确保 MCP 工具服务启动
+make start-cls
+make start-monitor
+
+# 如需重启所有服务：make restart
 
 # 访问 Web 界面，点击"智能运维与诊断工具"
 # 或使用 API
@@ -359,10 +387,10 @@ curl -X POST "http://localhost:9900/api/aiops" \
 
 ### 诊断流程
 ```
-1. Planner 制定计划 → 生成 4-6 个诊断步骤
-2. Executor 执行步骤 → 调用 MCP 工具（日志查询、监控数据）
-3. Replanner 评估结果 → 决定继续/调整/生成报告
-4. 输出诊断报告 → 根因分析 + 运维建议
+1. Planner 制定计划 → structured output 生成证据收集步骤
+2. Executor 执行步骤 → 读取 `AIMessage.tool_calls`，真实调用 MCP 工具并回填 `ToolMessage`
+3. Replanner 评估结果 → structured output 决定继续/调整/生成报告
+4. 输出诊断报告 → 根因分析 + 运维建议；证据不足时明确写证据不足
 ```
 
 ## 📝 开发指南
@@ -435,9 +463,18 @@ taskkill /F /PID <PID>
 
 ### API Key 错误
 ```bash
-# 检查环境变量
-cat .env | grep DASHSCOPE_API_KEY    # Linux/macOS
-type .env | findstr DASHSCOPE_API_KEY  # Windows
+# 检查模型配置（不要把真实 key 发到公网/截图）
+grep -E "^(LLM_PROVIDER|LLM_API_BASE|LLM_MODEL|EMBEDDING_PROVIDER|EMBEDDING_MODEL)=" .env
+
+# DashScope 旧配置也兼容，但推荐新项目使用 LLM_* / EMBEDDING_*
+grep -E "^(DASHSCOPE_API_BASE|DASHSCOPE_MODEL|DASHSCOPE_EMBEDDING_MODEL)=" .env
+```
+
+如果只有 GPT 中转、没有 embedding key，设置：
+
+```bash
+EMBEDDING_PROVIDER=disabled
+RAG_RETRIEVAL_MODE=hybrid_parent
 ```
 
 ### Milvus 连接失败

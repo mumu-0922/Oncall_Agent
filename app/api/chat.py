@@ -4,12 +4,14 @@
 """
 
 import json
+
 from fastapi import APIRouter, HTTPException
-from sse_starlette.sse import EventSourceResponse
-from app.models.request import ChatRequest, ClearRequest
-from app.models.response import SessionInfoResponse, ApiResponse
-from app.services.rag_agent_service import rag_agent_service
 from loguru import logger
+from sse_starlette.sse import EventSourceResponse
+
+from app.models.request import ChatRequest, ClearRequest
+from app.models.response import ApiResponse, SessionInfoResponse
+from app.services.rag_agent_service import rag_agent_service
 
 router = APIRouter()
 
@@ -35,10 +37,12 @@ async def chat(request: ChatRequest):
     """
     try:
         logger.info(f"[会话 {request.id}] 收到快速对话请求: {request.question}")
-        answer = await rag_agent_service.query(
+        result = await rag_agent_service.query_with_trace(
             request.question,
             session_id=request.id
         )
+        answer = result.get("answer", "")
+        trace = result.get("trace", [])
 
         logger.info(f"[会话 {request.id}] 快速对话完成")
 
@@ -48,6 +52,7 @@ async def chat(request: ChatRequest):
             "data": {
                 "success": True,
                 "answer": answer,
+                "trace": trace,
                 "errorMessage": None
             }
         }
@@ -114,6 +119,15 @@ async def chat_stream(request: ChatRequest):
                         "event": "message",
                         "data": json.dumps({
                             "type": "tool_call",
+                            "data": chunk_data
+                        }, ensure_ascii=False)
+                    }
+                elif chunk_type == "trace":
+                    # 发送 Agent 执行轨迹：阶段、工具调用、工具结果摘要
+                    yield {
+                        "event": "message",
+                        "data": json.dumps({
+                            "type": "trace",
                             "data": chunk_data
                         }, ensure_ascii=False)
                     }
@@ -191,7 +205,7 @@ async def clear_session(request: ClearRequest):
 
     except Exception as e:
         logger.error(f"清空会话错误: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=str(e)) from e
 
 
 @router.get("/chat/session/{session_id}", response_model=SessionInfoResponse)
@@ -215,4 +229,4 @@ async def get_session_info(session_id: str) -> SessionInfoResponse:
 
     except Exception as e:
         logger.error(f"获取会话信息错误: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=str(e)) from e

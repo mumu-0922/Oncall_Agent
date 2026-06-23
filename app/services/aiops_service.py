@@ -3,13 +3,15 @@
 基于 LangGraph 官方教程实现
 """
 
-from typing import AsyncGenerator, Dict, Any
-from langgraph.graph import StateGraph, END
+from collections.abc import AsyncGenerator
+from typing import Any
+
 from langgraph.checkpoint.memory import MemorySaver
+from langgraph.graph import END, StateGraph
 from loguru import logger
 
-from app.agent.aiops import PlanExecuteState, planner, executor, replanner
-
+from app.agent.aiops import PlanExecuteState, executor, planner, replanner
+from app.services.chat_trace_service import ChatTraceObserver
 
 # 节点名称常量
 NODE_PLANNER = "planner"
@@ -82,7 +84,7 @@ class AIOpsService:
         self,
         user_input: str,
         session_id: str = "default"
-    ) -> AsyncGenerator[Dict[str, Any], None]:
+    ) -> AsyncGenerator[dict[str, Any], None]:
         """
         执行 Plan-Execute-Replan 流程
 
@@ -101,6 +103,7 @@ class AIOpsService:
                 "input": user_input,
                 "plan": [],
                 "past_steps": [],
+                "tool_events": [],
                 "response": ""
             }
 
@@ -110,6 +113,17 @@ class AIOpsService:
                     "thread_id": session_id
                 }
             }
+            trace_observer = ChatTraceObserver()
+
+            yield self._format_trace_event(
+                trace_observer.event(
+                    "stage",
+                    "进入 AIOps Plan-Execute-Replan 诊断",
+                    status="started",
+                    node="aiops",
+                    summary="展示 Planner / Executor / Replanner 的可审计执行轨迹，不包含隐藏思维链。",
+                )
+            )
 
             async for event in self.graph.astream(
                 input=initial_state,
@@ -122,12 +136,16 @@ class AIOpsService:
 
                     # 根据节点类型生成不同的事件
                     if node_name == NODE_PLANNER:
+                        yield self._format_trace_event(self._planner_trace_event(node_output))
                         yield self._format_planner_event(node_output)
 
                     elif node_name == NODE_EXECUTOR:
+                        for trace_event in self._format_tool_trace_events(node_output):
+                            yield trace_event
                         yield self._format_executor_event(node_output)
 
                     elif node_name == NODE_REPLANNER:
+                        yield self._format_trace_event(self._replanner_trace_event(node_output))
                         yield self._format_replanner_event(node_output)
 
             # 获取最终状态
@@ -139,6 +157,14 @@ class AIOpsService:
                 final_response = final_state.values.get("response", "")
 
             # 发送完成事件
+            yield self._format_trace_event(
+                trace_observer.event(
+                    "stage",
+                    "AIOps 诊断流程结束",
+                    status="completed",
+                    node="aiops",
+                )
+            )
             yield {
                 "type": "complete",
                 "stage": "complete",
@@ -150,6 +176,16 @@ class AIOpsService:
 
         except Exception as e:
             logger.error(f"[会话 {session_id}] 任务执行失败: {e}", exc_info=True)
+            trace_observer = ChatTraceObserver()
+            yield self._format_trace_event(
+                trace_observer.event(
+                    "stage",
+                    "AIOps 诊断流程失败",
+                    status="error",
+                    node="aiops",
+                    summary=str(e),
+                )
+            )
             yield {
                 "type": "error",
                 "stage": "error",
@@ -159,7 +195,7 @@ class AIOpsService:
     async def diagnose(
         self,
         session_id: str = "default"
-    ) -> AsyncGenerator[Dict[str, Any], None]:
+    ) -> AsyncGenerator[dict[str, Any], None]:
         """
         AIOps 诊断接口（兼容旧接口）
 
@@ -261,7 +297,7 @@ class AIOpsService:
             else:
                 yield event
 
-    def _format_planner_event(self, state: Dict | None) -> Dict:
+    def _format_planner_event(self, state: dict | None) -> dict:
         """格式化 Planner 节点事件"""
         if not state:
             return {
@@ -279,7 +315,74 @@ class AIOpsService:
             "plan": plan
         }
 
-    def _format_executor_event(self, state: Dict | None) -> Dict:
+    def _format_trace_event(self, trace_event: dict) -> dict:
+        """把内部轨迹事件包装成前端统一识别的 SSE trace 事件。"""
+        return {
+            "type": "trace",
+            "stage": "trace",
+            "data": trace_event,
+        }
+
+    def _format_tool_trace_events(self, state: dict | None) -> list[dict]:
+        """格式化 Executor 本轮输出的工具轨迹事件。"""
+        if not state:
+            return []
+        raw_events = state.get("tool_events") or []
+        if not isinstance(raw_events, list):
+            return []
+        return [self._format_trace_event(event) for event in raw_events if isinstance(event, dict)]
+
+    def _planner_trace_event(self, state: dict | None) -> dict:
+        """生成 Planner 阶段的轨迹摘要。"""
+        observer = ChatTraceObserver()
+        if not state:
+            return observer.event(
+                "stage",
+                "Planner 开始制定诊断计划",
+                status="started",
+                node="planner",
+            )
+
+        plan = state.get("plan", [])
+        return observer.event(
+            "stage",
+            "Planner 已制定诊断计划",
+            status="completed",
+            node="planner",
+            summary="\n".join(f"{index + 1}. {step}" for index, step in enumerate(plan)),
+        )
+
+    def _replanner_trace_event(self, state: dict | None) -> dict:
+        """生成 Replanner 阶段的轨迹摘要。"""
+        observer = ChatTraceObserver()
+        if not state:
+            return observer.event(
+                "stage",
+                "Replanner 开始评估下一步",
+                status="started",
+                node="replanner",
+            )
+
+        response = state.get("response", "")
+        plan = state.get("plan", [])
+        if response:
+            return observer.event(
+                "stage",
+                "Replanner 决定生成最终报告",
+                status="completed",
+                node="replanner",
+                summary=observer.truncate_text(str(response), 900),
+            )
+
+        return observer.event(
+            "stage",
+            "Replanner 完成评估",
+            status="completed",
+            node="replanner",
+            summary=f"剩余 {len(plan)} 个步骤，继续执行。" if plan else "无剩余步骤，流程准备结束。",
+        )
+
+    def _format_executor_event(self, state: dict | None) -> dict:
         """格式化 Executor 节点事件"""
         if not state:
             return {
@@ -307,7 +410,7 @@ class AIOpsService:
                 "message": "开始执行步骤"
             }
 
-    def _format_replanner_event(self, state: Dict | None) -> Dict:
+    def _format_replanner_event(self, state: dict | None) -> dict:
         """格式化 Replanner 节点事件"""
         if not state:
             return {

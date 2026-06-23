@@ -7,9 +7,9 @@ from pymilvus import (
     DataType,
     FieldSchema,
     MilvusClient,
+    MilvusException,
     connections,
     utility,
-    MilvusException,
 )
 
 from app.config import config
@@ -20,10 +20,14 @@ class MilvusClientManager:
 
     # 常量定义
     COLLECTION_NAME: str = "biz"
-    VECTOR_DIM: int = 1024  # 统一使用 1024 维
     ID_MAX_LENGTH: int = 100
     CONTENT_MAX_LENGTH: int = 8000
     DEFAULT_SHARD_NUMBER: int = 2
+
+    @property
+    def vector_dim(self) -> int:
+        """Active embedding vector dimension."""
+        return config.embedding_dimensions
 
     def __init__(self) -> None:
         """初始化 Milvus 客户端管理器"""
@@ -65,7 +69,7 @@ class MilvusClientManager:
             else:
                 logger.info(f"collection '{self.COLLECTION_NAME}' 已存在")
                 self._collection = Collection(self.COLLECTION_NAME)
-                
+
                 # 检查向量维度是否匹配
                 schema = self._collection.schema
                 vector_field = None
@@ -74,20 +78,20 @@ class MilvusClientManager:
                     if field.name == "vector":
                         vector_field = field
                         break
-                
+
                 if vector_field and hasattr(vector_field, 'params') and 'dim' in vector_field.params:
                     existing_dim = vector_field.params['dim']
-                    if existing_dim != self.VECTOR_DIM:
+                    if existing_dim != self.vector_dim:
                         logger.warning(
-                            f"检测到向量维度不匹配！当前 collection 维度: {existing_dim}, 配置维度: {self.VECTOR_DIM}"
+                            f"检测到向量维度不匹配！当前 collection 维度: {existing_dim}, 配置维度: {self.vector_dim}"
                         )
                         logger.info(f"正在删除旧 collection '{self.COLLECTION_NAME}'...")
                         _ = utility.drop_collection(self.COLLECTION_NAME)
                         logger.info(f"正在重新创建 collection '{self.COLLECTION_NAME}'...")
                         self._create_collection()
-                        logger.info(f"成功重新创建 collection，维度: {self.VECTOR_DIM}")
+                        logger.info(f"成功重新创建 collection，维度: {self.vector_dim}")
                     else:
-                        logger.info(f"向量维度匹配: {self.VECTOR_DIM}")
+                        logger.info(f"向量维度匹配: {self.vector_dim}")
 
             # 加载 collection
             self._load_collection()
@@ -126,7 +130,7 @@ class MilvusClientManager:
             FieldSchema(
                 name="vector",
                 dtype=DataType.FLOAT_VECTOR,
-                dim=self.VECTOR_DIM,
+                dim=self.vector_dim,
             ),
             FieldSchema(
                 name="content",
@@ -244,7 +248,7 @@ class MilvusClientManager:
     def close(self) -> None:
         """关闭连接"""
         errors = []
-        
+
         try:
             if self._collection is not None:
                 self._collection.release()
@@ -259,7 +263,7 @@ class MilvusClientManager:
             errors.append(f"断开连接失败: {e}")
 
         self._client = None
-        
+
         if errors:
             error_msg = "; ".join(errors)
             logger.error(f"关闭 Milvus 连接时出现错误: {error_msg}")

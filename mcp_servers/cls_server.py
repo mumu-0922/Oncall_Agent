@@ -6,9 +6,19 @@
 import logging
 import functools
 import json
+import os
 from typing import Dict, Any, Optional
 from datetime import datetime, timedelta
+from pathlib import Path
 from fastmcp import FastMCP
+
+try:
+    from dotenv import load_dotenv
+except ImportError:  # pragma: no cover - python-dotenv is a project dependency
+    load_dotenv = None
+
+if load_dotenv:
+    load_dotenv()
 
 # 配置日志
 logging.basicConfig(
@@ -101,6 +111,230 @@ def generate_time_series(base_time: datetime, minutes_offset: int) -> str:
     return result_time.strftime("%Y-%m-%d %H:%M:%S")
 
 
+LOCAL_LOG_PROVIDER_NAMES = {"local", "local_vps", "local_wsl", "wsl", "vps", "file"}
+MOCK_LOG_PROVIDER_NAMES = {"mock", "demo", "sample"}
+
+
+def _log_provider() -> str:
+    return os.getenv("AIOPS_LOG_PROVIDER", "disabled").strip().lower() or "disabled"
+
+
+def _is_local_log_provider() -> bool:
+    return _log_provider() in LOCAL_LOG_PROVIDER_NAMES
+
+
+def _allow_mock_provider() -> bool:
+    return os.getenv("AIOPS_ALLOW_MOCK", "false").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _is_mock_log_provider() -> bool:
+    return _log_provider() in MOCK_LOG_PROVIDER_NAMES
+
+
+def _provider_error_response(action: str, **extra: Any) -> Dict[str, Any]:
+    provider = _log_provider()
+    if _is_mock_log_provider() and not _allow_mock_provider():
+        error = "AIOps mock 日志数据已被禁用；拒绝返回假 topic/假日志。"
+        suggestion = "设置 AIOPS_LOG_PROVIDER=local_wsl/local_vps，或仅演示时显式设置 AIOPS_ALLOW_MOCK=true。"
+    else:
+        error = f"未配置可用日志数据源: AIOPS_LOG_PROVIDER={provider}"
+        suggestion = "设置 AIOPS_LOG_PROVIDER=local_wsl/local_vps，并配置 AIOPS_SERVICE_LOG_MAP。"
+    return {
+        "action": action,
+        "source": provider,
+        "error": error,
+        "suggestion": suggestion,
+        **extra,
+    }
+
+
+def _load_json_env(name: str) -> dict[str, Any]:
+    raw = os.getenv(name, "").strip()
+    if not raw:
+        return {}
+    try:
+        value = json.loads(raw)
+    except json.JSONDecodeError:
+        logger.warning("环境变量 %s 不是合法 JSON，已忽略", name)
+        return {}
+    return value if isinstance(value, dict) else {}
+
+
+def _default_service_name() -> str:
+    return os.getenv("AIOPS_DEFAULT_SERVICE", "").strip()
+
+
+def _local_log_map() -> dict[str, list[str]]:
+    """服务到本机日志文件路径的映射。"""
+    mapping = _load_json_env("AIOPS_SERVICE_LOG_MAP")
+    normalized: dict[str, list[str]] = {}
+    for service_name, raw_paths in mapping.items():
+        if isinstance(raw_paths, str):
+            paths = [item.strip() for item in raw_paths.split("|") if item.strip()]
+        elif isinstance(raw_paths, list):
+            paths = [str(item).strip() for item in raw_paths if str(item).strip()]
+        else:
+            paths = []
+        normalized[str(service_name)] = paths
+    return normalized
+
+
+def _topic_id_for_service(service_name: str) -> str:
+    safe = "".join(ch if ch.isalnum() or ch in {"-", "_"} else "-" for ch in service_name)
+    return f"local:{safe}"
+
+
+def _service_from_topic_id(topic_id: str) -> str | None:
+    return topic_id.removeprefix("local:") if topic_id.startswith("local:") else None
+
+
+def _resolve_service_from_topic_id(topic_id: str, log_map: dict[str, list[str]]) -> str | None:
+    """把 local:<service> topic_id 还原为日志映射中的真实 service_name。"""
+    if not topic_id.startswith("local:"):
+        return None
+    direct_service = _service_from_topic_id(topic_id)
+    if direct_service in log_map:
+        return direct_service
+    for mapped_service in log_map:
+        if _topic_id_for_service(mapped_service) == topic_id:
+            return mapped_service
+    return direct_service
+
+
+def _local_topic_for_service(service_name: str, paths: list[str]) -> dict[str, Any]:
+    existing = [path for path in paths if Path(path).exists()]
+    return {
+        "topic_id": _topic_id_for_service(service_name),
+        "topic_name": f"{service_name} 本机日志",
+        "service_name": service_name,
+        "region_code": "local-vps",
+        "create_time": None,
+        "log_count": None,
+        "description": "local 本机日志文件映射",
+        "paths": paths,
+        "available": bool(existing),
+        "existing_paths": existing,
+    }
+
+
+def _line_matches_query(line: str, query: Optional[str]) -> bool:
+    if not query:
+        return True
+    # 轻量兼容：把常见 CLS 查询里的 level:ERROR / OR 拆成关键字匹配。
+    cleaned = (
+        query.replace("(", " ")
+        .replace(")", " ")
+        .replace(":", " ")
+        .replace('"', " ")
+        .replace("'", " ")
+    )
+    keywords = [
+        part.strip().lower()
+        for part in cleaned.replace(" OR ", " ").replace(" or ", " ").split()
+        if part.strip() and part.strip().upper() not in {"AND", "OR", "LEVEL", "MESSAGE"}
+    ]
+    if not keywords:
+        return True
+    lowered = line.lower()
+    return any(keyword in lowered for keyword in keywords)
+
+
+def _parse_line_timestamp_ms(line: str, fallback_ms: int) -> int:
+    # 支持 "YYYY-MM-DD HH:MM:SS" / ISO 前缀；解析失败则用文件 mtime。
+    candidates = [line[:19], line[:23], line[:25]]
+    for candidate in candidates:
+        for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M:%S"):
+            try:
+                return int(datetime.strptime(candidate[:19], fmt).timestamp() * 1000)
+            except ValueError:
+                continue
+    return fallback_ms
+
+
+def _search_local_logs(
+    *,
+    topic_id: str,
+    start_time: int,
+    end_time: int,
+    query: Optional[str],
+    limit: int,
+) -> Dict[str, Any]:
+    log_map = _local_log_map()
+    service_name = _resolve_service_from_topic_id(topic_id, log_map)
+    paths = log_map.get(service_name or "", []) if service_name else []
+    if not service_name or not paths:
+        return {
+            "topic_id": topic_id,
+            "start_time": start_time,
+            "end_time": end_time,
+            "query": query,
+            "limit": limit,
+            "total": 0,
+            "logs": [],
+            "took_ms": 0,
+            "source": f"{_log_provider()}:file",
+            "error": f"未配置 topic_id={topic_id} 对应的本机日志文件",
+            "message": "请在 .env 配置 AIOPS_SERVICE_LOG_MAP",
+        }
+
+    logs: list[dict[str, Any]] = []
+    scanned_files = []
+    for raw_path in paths:
+        path = Path(raw_path)
+        if not path.exists() or not path.is_file():
+            continue
+        scanned_files.append(str(path))
+        try:
+            fallback_ms = int(path.stat().st_mtime * 1000)
+            # 简化读取：保留最后约 5000 行，避免超大日志拖垮诊断。
+            lines = path.read_text(encoding="utf-8", errors="ignore").splitlines()[-5000:]
+        except OSError as exc:
+            logger.warning("读取本机日志失败 %s: %s", path, exc)
+            continue
+        for line in lines:
+            timestamp_ms = _parse_line_timestamp_ms(line, fallback_ms)
+            if timestamp_ms < start_time or timestamp_ms > end_time:
+                continue
+            if not _line_matches_query(line, query):
+                continue
+            logs.append(
+                {
+                    "timestamp": datetime.fromtimestamp(timestamp_ms / 1000).strftime(
+                        "%Y-%m-%d %H:%M:%S"
+                    ),
+                    "level": _guess_log_level(line),
+                    "message": line,
+                    "file": str(path),
+                }
+            )
+    logs.sort(key=lambda item: item["timestamp"], reverse=True)
+    logs = logs[: max(1, limit)]
+    return {
+        "topic_id": topic_id,
+        "start_time": start_time,
+        "end_time": end_time,
+        "query": query,
+        "limit": limit,
+        "total": len(logs),
+        "logs": logs,
+        "took_ms": 0,
+        "source": f"{_log_provider()}:file",
+        "scanned_files": scanned_files,
+        "message": f"本机日志查询返回 {len(logs)} 条",
+    }
+
+
+def _guess_log_level(line: str) -> str:
+    lowered = line.lower()
+    if "error" in lowered or "exception" in lowered or "traceback" in lowered:
+        return "ERROR"
+    if "warn" in lowered:
+        return "WARN"
+    if "debug" in lowered:
+        return "DEBUG"
+    return "INFO"
+
+
 @mcp.tool()
 @log_tool_call
 def get_current_timestamp() -> int:
@@ -147,6 +381,16 @@ def get_region_code_by_name(region_name: str) -> Dict[str, Any]:
             - region_name: 地区名称
             - available: 是否可用
     """
+    if _is_local_log_provider() and region_name.lower() in {"local", "vps", "本机", "本地"}:
+        return {"region_code": "local-vps", "region_name": "本机 VPS", "available": True}
+    if not (_is_mock_log_provider() and _allow_mock_provider()):
+        return _provider_error_response(
+            "get_region_code_by_name",
+            region_name=region_name,
+            region_code=None,
+            available=False,
+        )
+
     # 模拟地区映射表（实际应该从配置或数据库读取）
     region_mapping = {
         "北京": {"region_code": "ap-beijing", "region_name": "北京", "available": True},
@@ -183,6 +427,26 @@ def get_topic_info_by_name(topic_name: str, region_code: Optional[str] = None) -
             - create_time: 创建时间
             - log_count: 日志数量
     """
+    if _is_local_log_provider():
+        for service_name, paths in _local_log_map().items():
+            topic = _local_topic_for_service(service_name, paths)
+            if topic["topic_name"] == topic_name or topic["topic_id"] == topic_name:
+                return topic
+        return {
+            "topic_id": None,
+            "topic_name": topic_name,
+            "region_code": region_code,
+            "source": f"{_log_provider()}:file",
+            "error": f"未找到本机日志主题: {topic_name}",
+        }
+    if not (_is_mock_log_provider() and _allow_mock_provider()):
+        return _provider_error_response(
+            "get_topic_info_by_name",
+            topic_name=topic_name,
+            region_code=region_code,
+            topic_id=None,
+        )
+
     mock_topics = [
         {
             "topic_id": "topic-001",
@@ -279,6 +543,58 @@ def search_topic_by_service_name(
             end_time=current_ts
         )
     """
+    if _is_local_log_provider():
+        log_map = _local_log_map()
+        allow_local_region = not region_code or region_code == "local-vps"
+        matched_topics = []
+        for mapped_service, paths in log_map.items():
+            if region_code and region_code != "local-vps":
+                continue
+            mapped_lower = mapped_service.lower()
+            query_lower = service_name.lower()
+            is_match = (
+                query_lower in mapped_lower or mapped_lower in query_lower
+                if fuzzy
+                else mapped_lower == query_lower
+            )
+            if is_match:
+                matched_topics.append(_local_topic_for_service(mapped_service, paths))
+        fallback_service = None
+        if not matched_topics and allow_local_region and len(log_map) == 1:
+            fallback_service, fallback_paths = next(iter(log_map.items()))
+            matched_topics.append(_local_topic_for_service(fallback_service, fallback_paths))
+        elif not matched_topics and allow_local_region and _default_service_name() in log_map:
+            fallback_service = _default_service_name()
+            matched_topics.append(_local_topic_for_service(fallback_service, log_map[fallback_service]))
+        return {
+            "total": len(matched_topics),
+            "topics": matched_topics,
+            "query": {
+                "service_name": service_name,
+                "region_code": region_code,
+                "fuzzy": fuzzy,
+            },
+            "source": f"{_log_provider()}:file",
+            "message": (
+                f"未找到服务 '{service_name}' 的精确映射，已 fallback 到唯一已配置服务 '{fallback_service}'"
+                if fallback_service
+                else f"找到 {len(matched_topics)} 个本机日志主题"
+                if matched_topics
+                else f"未找到服务 '{service_name}' 的本机日志映射；请配置 AIOPS_SERVICE_LOG_MAP"
+            ),
+        }
+    if not (_is_mock_log_provider() and _allow_mock_provider()):
+        return {
+            "total": 0,
+            "topics": [],
+            "query": {
+                "service_name": service_name,
+                "region_code": region_code,
+                "fuzzy": fuzzy,
+            },
+            **_provider_error_response("search_topic_by_service_name"),
+        }
+
     # Mock 主题数据（实际应该从配置或数据库读取）
     mock_topics = [
         {
@@ -408,6 +724,27 @@ def search_log(
             limit=100
         )
     """
+    if _is_local_log_provider():
+        return _search_local_logs(
+            topic_id=topic_id,
+            start_time=start_time,
+            end_time=end_time,
+            query=query,
+            limit=limit,
+        )
+    if not (_is_mock_log_provider() and _allow_mock_provider()):
+        return {
+            "topic_id": topic_id,
+            "start_time": start_time,
+            "end_time": end_time,
+            "query": query,
+            "limit": limit,
+            "total": 0,
+            "logs": [],
+            "took_ms": 0,
+            **_provider_error_response("search_log"),
+        }
+
     # 根据 topic_id 返回不同的结果
     if topic_id == "topic-001":
         # topic-001: 应用日志，动态生成 INFO 日志
