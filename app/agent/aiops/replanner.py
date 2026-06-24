@@ -95,6 +95,7 @@ response_prompt = ChatPromptTemplate.from_messages(
                 响应要求：
                 - 使用 Markdown 格式。
                 - 必须优先基于 Evidence Package 里的真实工具结果，不要编造。
+                - 必须优先解释 Analyzer Findings；不要绕过 analyzer 自己猜根因。
                 - 每个根因/风险/建议都要能对应 Evidence Package 中的证据 ID；不能对应时必须写“证据不足”。
                 - 如果工具结果包含 error/source unavailable/未配置/禁用 mock，必须把该错误作为结论的一部分原样说明。
                 - 禁止把知识库经验、示例服务名、示例 PID 当作本次真实环境事实。
@@ -310,13 +311,23 @@ async def _generate_response(state: PlanExecuteState, llm: BaseChatModel) -> dic
 def _ensure_evidence_references(response: str, evidence_package: EvidencePackage) -> str:
     """确保最终报告至少带上证据索引，避免报告和证据包脱节。"""
     item_ids = [item.id for item in evidence_package.all_items()]
-    if not item_ids or any(item_id in response for item_id in item_ids):
+    finding_ids = [finding.id for finding in evidence_package.findings]
+    reference_ids = [*item_ids, *finding_ids]
+    if not reference_ids or any(reference_id in response for reference_id in reference_ids):
         return response
     index_lines = ["", "---", "", "## 证据索引"]
     for item in evidence_package.all_items():
         index_lines.append(
             f"- `{item.id}` `{item.kind}` `{item.tool_name}`: {item.summary or item.title}"
         )
+    if evidence_package.findings:
+        index_lines.extend(["", "## Analyzer Findings"])
+        for finding in evidence_package.findings:
+            refs = ", ".join(finding.evidence_refs) if finding.evidence_refs else "无证据引用"
+            index_lines.append(
+                f"- `{finding.id}` `{finding.analyzer}` {finding.status}/{finding.severity} "
+                f"refs={refs}: {finding.summary}"
+            )
     return response.rstrip() + "\n" + "\n".join(index_lines)
 
 

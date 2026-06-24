@@ -13,6 +13,8 @@ from pydantic import BaseModel, Field
 
 EvidenceKind = Literal["alert", "metric", "log", "runbook", "tool_error", "tool_result"]
 ConfidenceLevel = Literal["low", "medium", "high"]
+FindingStatus = Literal["normal", "warning", "critical", "unknown"]
+FindingSeverity = Literal["info", "warning", "critical"]
 
 
 class EvidenceItem(BaseModel):
@@ -26,6 +28,19 @@ class EvidenceItem(BaseModel):
     title: str = Field(default="", description="面向报告的短标题")
     summary: str = Field(default="", description="短摘要，保留真实错误原因")
     raw_excerpt: str = Field(default="", description="截断后的原始工具返回")
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class AnalyzerFinding(BaseModel):
+    """一个确定性 analyzer 的结构化发现。"""
+
+    id: str
+    analyzer: str
+    status: FindingStatus
+    severity: FindingSeverity
+    summary: str
+    evidence_refs: list[str] = Field(default_factory=list)
+    next_queries: list[str] = Field(default_factory=list)
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 
@@ -43,6 +58,7 @@ class EvidencePackage(BaseModel):
     runbooks: list[EvidenceItem] = Field(default_factory=list)
     tool_errors: list[EvidenceItem] = Field(default_factory=list)
     tool_results: list[EvidenceItem] = Field(default_factory=list)
+    findings: list[AnalyzerFinding] = Field(default_factory=list)
     limitations: list[str] = Field(default_factory=list)
     confidence: ConfidenceLevel = "low"
 
@@ -92,6 +108,7 @@ class EvidencePackage(BaseModel):
             "runbooks": [item.model_dump(mode="json") for item in self.runbooks],
             "tool_errors": [item.model_dump(mode="json") for item in self.tool_errors],
             "tool_results": [item.model_dump(mode="json") for item in self.tool_results],
+            "findings": [finding.model_dump(mode="json") for finding in self.findings],
         }
 
     def to_prompt_markdown(self) -> str:
@@ -110,6 +127,14 @@ class EvidencePackage(BaseModel):
         if self.limitations:
             lines.append("\n## Limitations")
             lines.extend(f"- {item}" for item in self.limitations)
+        if self.findings:
+            lines.append("\n## Analyzer Findings")
+            for finding in self.findings:
+                refs = ", ".join(finding.evidence_refs) if finding.evidence_refs else "no-evidence-ref"
+                lines.append(
+                    f"- [{finding.id}] {finding.analyzer} {finding.status}/{finding.severity} "
+                    f"refs={refs}: {finding.summary}"
+                )
 
         sections = [
             ("Alerts", self.alerts),

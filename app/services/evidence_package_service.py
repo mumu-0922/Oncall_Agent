@@ -12,6 +12,7 @@ import re
 from collections.abc import Mapping
 from typing import Any
 
+from app.agent.aiops.analyzers.rules import run_analyzers
 from app.models.evidence import EvidenceItem, EvidenceKind, EvidencePackage
 from app.services.chat_trace_service import ChatTraceObserver
 
@@ -63,8 +64,15 @@ class EvidencePackageService:
 
         service_names = self._extract_service_names(items)
         time_range = self._extract_time_range(items)
-        limitations = self._extract_limitations(items)
-        confidence = self._confidence(alerts=alerts, metrics=metrics, logs=logs, tool_errors=tool_errors)
+        findings = run_analyzers(items)
+        limitations = self._extract_limitations(items, findings)
+        confidence = self._confidence(
+            alerts=alerts,
+            metrics=metrics,
+            logs=logs,
+            tool_errors=tool_errors,
+            findings=findings,
+        )
 
         return EvidencePackage(
             incident_id=incident_id,
@@ -77,6 +85,7 @@ class EvidencePackageService:
             runbooks=runbooks,
             tool_errors=tool_errors,
             tool_results=tool_results,
+            findings=findings,
             limitations=limitations,
             confidence=confidence,
         )
@@ -110,6 +119,15 @@ class EvidencePackageService:
             lines.extend(["", "## 已取得但不足以定责的证据"])
             for item in non_error_items:
                 lines.append(f"- `{item.id}` `{item.tool_name}`: {item.summary or item.title}")
+
+        if package.findings:
+            lines.extend(["", "## Analyzer 发现"])
+            for finding in package.findings:
+                refs = ", ".join(finding.evidence_refs) if finding.evidence_refs else "无证据引用"
+                lines.append(
+                    f"- `{finding.id}` `{finding.analyzer}` {finding.status}/{finding.severity} "
+                    f"refs={refs}: {finding.summary}"
+                )
 
         if package.limitations:
             lines.extend(["", "## 证据限制"])
@@ -324,7 +342,7 @@ class EvidencePackageService:
             result["end_time"] = max(ends)
         return result
 
-    def _extract_limitations(self, items: list[EvidenceItem]) -> list[str]:
+    def _extract_limitations(self, items: list[EvidenceItem], findings: list[Any]) -> list[str]:
         limitations: list[str] = []
         for item in items:
             if item.metadata.get("history_available") is False:
@@ -335,6 +353,11 @@ class EvidencePackageService:
                 limitations.append(f"{item.tool_name} 工具失败：{item.summary}")
         if not items:
             limitations.append("没有任何工具证据，不能生成根因结论。")
+        if items and not findings:
+            limitations.append("未命中任何确定性 analyzer，仅能列出原始证据，不能下根因结论。")
+        for finding in findings:
+            if getattr(finding, "status", "") == "unknown":
+                limitations.append(f"{finding.analyzer} 判断为 unknown：{finding.summary}")
         # 去重且保序
         deduped: list[str] = []
         for limitation in limitations:
@@ -349,7 +372,10 @@ class EvidencePackageService:
         metrics: list[EvidenceItem],
         logs: list[EvidenceItem],
         tool_errors: list[EvidenceItem],
+        findings: list[Any],
     ) -> str:
+        if any(getattr(finding, "status", "") == "critical" for finding in findings) and not tool_errors:
+            return "high"
         evidence_kinds = sum(1 for bucket in (alerts, metrics, logs) if bucket)
         if evidence_kinds >= 2 and not tool_errors:
             return "high"
