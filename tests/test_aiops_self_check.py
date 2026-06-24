@@ -119,7 +119,11 @@ async def test_self_check_returns_real_log_evidence(monkeypatch, tmp_path):
     assert components["search_local_logs"]["status"] == "ok"
     assert components["search_local_logs"]["details"]["source"] == "local_wsl:file"
     assert components["search_local_logs"]["details"]["total"] == 1
+    assert components["search_local_logs"]["details"]["analysis"]["signal_count"] == 1
+    assert components["search_local_logs"]["details"]["analysis"]["categories"]["timeout"] == 1
     assert "/tmp/app.log" in result["report"]
+    assert "最近问题摘要" in result["report"]
+    assert "有效异常" in result["report"]
     assert "未调用 LLM" in result["report"]
 
 
@@ -139,6 +143,68 @@ async def test_self_check_marks_missing_log_map_without_fake_data(monkeypatch):
     assert components["local_log_config"]["status"] == "error"
     assert "不会扫描全盘" in components["local_log_config"]["summary"]
     assert "不会补假数据" in result["report"]
+
+
+@pytest.mark.asyncio
+async def test_self_check_samples_only_signal_logs(monkeypatch, tmp_path):
+    log_file = tmp_path / "app.log"
+    log_file.write_text("2026-06-24 14:00:00 | ERROR | gateway timeout\n", encoding="utf-8")
+    monkeypatch.setenv("AIOPS_LOG_PROVIDER", "local_wsl")
+    monkeypatch.setenv("AIOPS_DEFAULT_SERVICE", "super-biz-agent")
+    monkeypatch.setenv("AIOPS_SERVICE_LOG_MAP", json.dumps({"super-biz-agent": [str(log_file)]}))
+    monkeypatch.setenv("AIOPS_MONITOR_PROVIDER", "local_wsl")
+
+    @tool
+    async def noisy_search_local_logs(**kwargs) -> str:
+        """noisy search local logs"""
+        return json.dumps(
+            {
+                "tool": "search_local_logs",
+                "source": "local_wsl:file",
+                "matched_service": "super-biz-agent",
+                "query": "level:ERROR OR level:WARN OR timeout",
+                "total": 2,
+                "scanned_files": [str(log_file)],
+                "logs": [
+                    {
+                        "timestamp": "2026-06-24 14:00:00",
+                        "level": "ERROR",
+                        "file": str(log_file),
+                        "message": '"query": "level:ERROR OR level:WARN OR timeout"',
+                    },
+                    {
+                        "timestamp": "2026-06-24 14:00:01",
+                        "level": "ERROR",
+                        "file": str(log_file),
+                        "message": "\x1b[31m2026-06-24 14:00:01 ERROR gateway timeout request_id=req-1\x1b[0m",
+                    },
+                ],
+            },
+            ensure_ascii=False,
+        )
+
+    async def fake_tools(*args, **kwargs):
+        noisy_search_local_logs.name = "search_local_logs"
+        return [], [
+            noisy_search_local_logs,
+            query_cpu_metrics,
+            query_memory_metrics,
+            query_metric_instant,
+            list_active_alerts,
+        ]
+
+    monkeypatch.setattr("app.services.aiops_self_check_service.load_aiops_tools_strict", fake_tools)
+
+    result = await AIOpsSelfCheckService().run()
+    details = {component["name"]: component for component in result["components"]}[
+        "search_local_logs"
+    ]["details"]
+
+    assert details["analysis"]["signal_count"] == 1
+    assert details["analysis"]["noise_count"] == 1
+    assert len(details["sampled_logs"]) == 1
+    assert "query" not in details["sampled_logs"][0]["message"]
+    assert "\x1b" not in details["sampled_logs"][0]["message"]
 
 
 @pytest.mark.asyncio

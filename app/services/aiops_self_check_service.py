@@ -19,6 +19,7 @@ import httpx
 from app.agent.aiops.utils import format_exception, load_aiops_tools_strict
 from app.config import config
 from app.core.milvus_client import milvus_manager
+from app.services.log_analysis_service import log_analysis_service
 
 _SECRET_PATTERNS = (
     re.compile(r"sk-[A-Za-z0-9_\-]{8,}"),
@@ -329,14 +330,20 @@ class AIOpsSelfCheckService:
             )
 
         logs = payload.get("logs") if isinstance(payload.get("logs"), list) else []
+        analysis = log_analysis_service.analyze(logs)
+        sampled_evidence = analysis.get("sampled_evidence") if isinstance(analysis, dict) else []
+        display_logs = sampled_evidence if isinstance(sampled_evidence, list) else logs
         sampled_logs = [
             {
                 "timestamp": item.get("timestamp"),
                 "level": item.get("level"),
                 "file": item.get("file"),
-                "message": self._mask_secret_text(str(item.get("message", "")))[:500],
+                "message": self._mask_secret_text(
+                    log_analysis_service.clean_text(str(item.get("message", "")))
+                )[:500],
+                "categories": item.get("categories"),
             }
-            for item in logs[:5]
+            for item in display_logs[:5]
             if isinstance(item, dict)
         ]
         details = {
@@ -350,6 +357,7 @@ class AIOpsSelfCheckService:
             "limited": payload.get("limited"),
             "took_ms": payload.get("took_ms"),
             "sampled_logs": sampled_logs,
+            "analysis": analysis,
             "error": payload.get("error"),
         }
         if payload.get("error"):
@@ -470,6 +478,9 @@ class AIOpsSelfCheckService:
             f"- 生成时间：`{result['generated_at']}`",
             f"- 耗时：`{result['took_ms']} ms`",
             "",
+            "## 最近问题摘要",
+            *self._render_log_analysis_summary(result),
+            "",
             "## 检查结果",
         ]
         for component in result["components"]:
@@ -487,10 +498,23 @@ class AIOpsSelfCheckService:
                 lines.append(f"- 匹配服务：`{details.get('matched_service')}`")
                 lines.append(f"- 查询语句：`{details.get('query')}`")
                 lines.append(f"- 返回条数：`{details.get('total')}`")
+                analysis = details.get("analysis") or {}
+                if analysis:
+                    lines.append(f"- 有效异常信号：`{analysis.get('signal_count')}`")
+                    lines.append(f"- 过滤噪声：`{analysis.get('noise_count')}`")
                 scanned_files = details.get("scanned_files") or []
                 if scanned_files:
                     lines.append("- 扫描文件：")
                     lines.extend(f"  - `{path}`" for path in scanned_files)
+                top_fingerprints = analysis.get("top_fingerprints") if isinstance(analysis, dict) else []
+                if top_fingerprints:
+                    lines.append("- Top 错误指纹：")
+                    for item in top_fingerprints[:3]:
+                        lines.append(
+                            "  - "
+                            f"`x{item.get('count')}` "
+                            f"{self._mask_secret_text(str(item.get('fingerprint', '')))[:240]}"
+                        )
                 sampled_logs = details.get("sampled_logs") or []
                 if sampled_logs:
                     lines.append("- 样例日志：")
@@ -510,6 +534,30 @@ class AIOpsSelfCheckService:
             ]
         )
         return "\n".join(lines)
+
+    def _render_log_analysis_summary(self, result: dict[str, Any]) -> list[str]:
+        for component in result.get("components", []):
+            if component.get("name") != "search_local_logs":
+                continue
+            analysis = (component.get("details") or {}).get("analysis") or {}
+            if not analysis:
+                break
+            lines = [
+                f"- {self._mask_secret_text(str(analysis.get('summary') or '未发现明确异常证据'))}",
+                f"- 原始日志：`{analysis.get('raw_count', 0)}`，"
+                f"有效异常：`{analysis.get('signal_count', 0)}`，"
+                f"噪声/低信号：`{analysis.get('noise_count', 0)}`",
+            ]
+            categories = analysis.get("categories") or {}
+            if categories:
+                category_text = "，".join(f"{key}={value}" for key, value in categories.items())
+                lines.append(f"- 分类：`{category_text}`")
+            actions = analysis.get("recommended_next_actions") or []
+            if actions:
+                lines.append("- 建议动作：")
+                lines.extend(f"  - {self._mask_secret_text(str(action))}" for action in actions[:3])
+            return lines
+        return ["- 未获得可分析的日志证据。"]
 
     def _component(
         self,
