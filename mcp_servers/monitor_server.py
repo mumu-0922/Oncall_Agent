@@ -466,9 +466,15 @@ def _data_points_from_prometheus_matrix(results: list[dict[str, Any]]) -> list[d
 
 
 def _format_query_template(template: str, service_name: str) -> str:
-    matched_service, patterns = _service_patterns(service_name)
     # PromQL 本身大量使用 `{label="value"}`，不能直接 str.format；
     # 只替换本项目支持的占位符，保留 PromQL label selector 花括号。
+    needs_service_mapping = any(
+        placeholder in template
+        for placeholder in ("{service_name}", "{matched_service}", "{first_pattern}")
+    )
+    matched_service, patterns = (
+        _service_patterns(service_name) if needs_service_mapping else (service_name, [service_name])
+    )
     replacements = {
         "{service_name}": service_name,
         "{matched_service}": matched_service,

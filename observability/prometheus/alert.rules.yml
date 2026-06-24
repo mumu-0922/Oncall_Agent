@@ -1,0 +1,42 @@
+groups:
+  - name: aiops-node-alerts
+    rules:
+      - alert: AIOpsNodeExporterDown
+        expr: up{job="node-exporter"} == 0
+        for: 1m
+        labels:
+          severity: critical
+          service: host
+        annotations:
+          summary: "node_exporter is down"
+          description: "Prometheus cannot scrape node_exporter for more than 1 minute."
+
+      - alert: AIOpsHighCPUUsage
+        expr: 100 * (1 - avg by(instance) (rate(node_cpu_seconds_total{mode="idle"}[5m]))) > 80
+        for: 2m
+        labels:
+          severity: warning
+          service: host
+        annotations:
+          summary: "High CPU usage on {{ $labels.instance }}"
+          description: "CPU usage has been above 80% for more than 2 minutes. Current value: {{ $value | printf \"%.2f\" }}%."
+
+      - alert: AIOpsHighMemoryUsage
+        expr: 100 * (1 - (node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes)) > 80
+        for: 2m
+        labels:
+          severity: warning
+          service: host
+        annotations:
+          summary: "High memory usage on {{ $labels.instance }}"
+          description: "Memory usage has been above 80% for more than 2 minutes. Current value: {{ $value | printf \"%.2f\" }}%."
+
+      - alert: AIOpsLowDiskSpace
+        expr: 100 * (1 - (node_filesystem_avail_bytes{fstype!~"tmpfs|overlay|squashfs|aufs"} / node_filesystem_size_bytes{fstype!~"tmpfs|overlay|squashfs|aufs"})) > 85
+        for: 5m
+        labels:
+          severity: warning
+          service: host
+        annotations:
+          summary: "Low disk space on {{ $labels.instance }} {{ $labels.mountpoint }}"
+          description: "Filesystem usage has been above 85% for more than 5 minutes. Current value: {{ $value | printf \"%.2f\" }}%."

@@ -30,7 +30,8 @@ NC = \033[0m
         web-install web-dev web-build web-preview api-dev dev-all \
         security pre-commit-install pre-commit check-all coverage eval-retrieval eval-rag docs shell \
         ipython watch add add-dev remove list-docs test-upload sync logs \
-        start-cls stop-cls start-monitor stop-monitor start-api stop-api status-mcp
+        start-cls stop-cls start-monitor stop-monitor start-api stop-api status-mcp \
+        obs-up obs-down obs-restart obs-status obs-logs obs-check
 
 # ============================================================
 # 默认目标：显示帮助信息
@@ -48,6 +49,9 @@ help:
 	@echo "  $(YELLOW)make up$(NC)           - 🐳 启动 Milvus 容器"
 	@echo "  $(YELLOW)make down$(NC)         - 🛑 停止 Milvus 容器"
 	@echo "  $(YELLOW)make status$(NC)       - 📊 查看容器状态"
+	@echo "  $(YELLOW)make obs-up$(NC)       - 📈 启动 Prometheus/Alertmanager/node_exporter"
+	@echo "  $(YELLOW)make obs-check$(NC)    - 🔎 验证 Prometheus/Alertmanager API"
+	@echo "  $(YELLOW)make obs-down$(NC)     - 🛑 停止观测栈"
 	@echo ""
 	@echo "$(CYAN)【服务管理】$(NC)"
 	@echo "  $(YELLOW)make start$(NC)        - 🚀 启动所有服务（MCP + FastAPI/静态前端）"
@@ -218,6 +222,42 @@ status:
 		echo "$(YELLOW)⚠️  没有找到 Milvus 相关容器$(NC)"; \
 		echo "$(YELLOW)提示: 请先创建 Milvus 容器$(NC)"; \
 	fi
+
+# ============================================================
+# Observability 管理（Prometheus + Alertmanager + node_exporter）
+# ============================================================
+
+obs-up:
+	@echo "$(YELLOW)📈 启动 AIOps 观测栈...$(NC)"
+	@docker compose -f docker-compose.observability.yml up -d
+	@$(MAKE) obs-status
+
+obs-down:
+	@echo "$(YELLOW)🛑 停止 AIOps 观测栈...$(NC)"
+	@docker compose -f docker-compose.observability.yml down
+
+obs-restart:
+	@$(MAKE) obs-down
+	@$(MAKE) obs-up
+
+obs-status:
+	@echo "$(YELLOW)📊 AIOps 观测栈状态:$(NC)"
+	@docker compose -f docker-compose.observability.yml ps
+
+obs-logs:
+	@echo "$(YELLOW)📜 AIOps 观测栈日志:$(NC)"
+	@docker compose -f docker-compose.observability.yml logs -f --tail=120
+
+obs-check:
+	@echo "$(YELLOW)🔎 检查 Prometheus / Alertmanager...$(NC)"
+	@curl -sS -f http://127.0.0.1:9090/-/ready
+	@echo ""
+	@echo "$(CYAN)Prometheus targets:$(NC)"
+	@curl -sS -f 'http://127.0.0.1:9090/api/v1/query?query=up'
+	@echo ""
+	@echo "$(CYAN)Alertmanager active alerts:$(NC)"
+	@curl -sS -f http://127.0.0.1:9093/api/v2/alerts
+	@echo ""
 
 # ============================================================
 # MCP 服务管理
