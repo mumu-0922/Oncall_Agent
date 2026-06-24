@@ -1,5 +1,6 @@
 // SuperBizAgent 前端应用
 import './styles.css';
+import { normalizeTraceToolPayload } from './tracePayload.js';
 
 class SuperBizAgentApp {
     constructor() {
@@ -1068,9 +1069,17 @@ class SuperBizAgentApp {
 
     getTraceDetailHtml(event) {
         const blocks = [];
-        if (event.summary) {
+
+        const parsedToolPayload = event.kind === 'tool_result'
+            ? normalizeTraceToolPayload(event)
+            : null;
+
+        if (parsedToolPayload) {
+            blocks.push(this.renderToolEvidenceCard(parsedToolPayload, event));
+        } else if (event.summary) {
             blocks.push(`<div class="trace-summary">${this.escapeHtml(this.truncateText(event.summary, 900))}</div>`);
         }
+
         if (event.args_preview) {
             blocks.push(`<pre class="trace-code">${this.escapeHtml(event.args_preview)}</pre>`);
         } else if (event.args) {
@@ -1080,6 +1089,135 @@ class SuperBizAgentApp {
             blocks.push(`<pre class="trace-code trace-metadata">${this.escapeHtml(this.safeJsonStringify(event.metadata, 700))}</pre>`);
         }
         return blocks.join('');
+    }
+
+    renderToolEvidenceCard(payload, event) {
+        const toolName = payload.tool || event.tool || 'unknown_tool';
+        const source = payload.source || 'unknown source';
+        const isError = Boolean(payload.error) || event.status === 'error';
+        const keyFields = [
+            ['tool', toolName],
+            ['source', source],
+            ['history_available', payload.history_available],
+            ['result_type', payload.result_type],
+            ['result_count', payload.result_count],
+            ['series_count', payload.series_count],
+            ['point_count', payload.point_count],
+            ['total', payload.total],
+            ['limited', payload.limited],
+            ['duration_ms', payload.duration_ms],
+        ];
+
+        const chips = keyFields
+            .filter(([, value]) => value !== undefined && value !== null && value !== '')
+            .map(([label, value]) => this.renderEvidenceField(label, value))
+            .join('');
+
+        const sections = [];
+        if (payload.error) {
+            sections.push(`
+                <div class="trace-evidence-alert trace-evidence-alert-error">
+                    ${this.escapeHtml(this.truncateText(payload.error, 700))}
+                </div>
+            `);
+        } else if (typeof payload.message === 'string') {
+            sections.push(`
+                <div class="trace-evidence-alert">
+                    ${this.escapeHtml(this.truncateText(payload.message, 500))}
+                </div>
+            `);
+        }
+
+        if (payload.query) {
+            sections.push(`
+                <div class="trace-evidence-section">
+                    <div class="trace-evidence-section-title">query</div>
+                    <pre class="trace-evidence-code">${this.escapeHtml(this.truncateText(payload.query, 900))}</pre>
+                </div>
+            `);
+        }
+
+        const compactSections = [
+            ['statistics', payload.statistics],
+            ['alert_info', payload.alert_info],
+        ];
+        compactSections.forEach(([title, value]) => {
+            if (value !== undefined && value !== null) {
+                sections.push(`
+                    <div class="trace-evidence-section">
+                        <div class="trace-evidence-section-title">${this.escapeHtml(title)}</div>
+                        <pre class="trace-evidence-json">${this.escapeHtml(this.renderCompactJson(value, 1200))}</pre>
+                    </div>
+                `);
+            }
+        });
+
+        const expandableSections = [
+            ['results', payload.results],
+            ['alerts', payload.alerts],
+            ['logs', payload.logs],
+            ['raw', payload.raw],
+        ];
+        expandableSections.forEach(([title, value]) => {
+            if (value !== undefined && value !== null) {
+                sections.push(this.renderEvidenceDetails(title, value, 1800));
+            }
+        });
+
+        sections.push(this.renderEvidenceDetails('原始工具返回', event.summary || payload, 2000));
+
+        return `
+            <div class="trace-evidence-card ${isError ? 'trace-evidence-card-error' : ''}">
+                <div class="trace-evidence-card-head">
+                    <span class="trace-evidence-badge">${isError ? 'ERROR' : 'REAL TOOL RESULT'}</span>
+                    <span class="trace-evidence-source">${this.escapeHtml(source)}</span>
+                </div>
+                <div class="trace-evidence-grid">${chips}</div>
+                ${sections.join('')}
+            </div>
+        `;
+    }
+
+    renderEvidenceField(label, value) {
+        return `
+            <div class="trace-evidence-chip">
+                <span class="trace-evidence-chip-key">${this.escapeHtml(label)}</span>
+                <span class="trace-evidence-chip-value">${this.escapeHtml(this.formatEvidenceValue(value))}</span>
+            </div>
+        `;
+    }
+
+    renderEvidenceDetails(title, value, limit = 1200) {
+        return `
+            <details class="trace-evidence-details">
+                <summary>${this.escapeHtml(title)}</summary>
+                <pre class="trace-evidence-json">${this.escapeHtml(this.renderCompactJson(value, limit))}</pre>
+            </details>
+        `;
+    }
+
+    formatEvidenceValue(value) {
+        if (typeof value === 'boolean') {
+            return value ? 'true' : 'false';
+        }
+        if (typeof value === 'number') {
+            return Number.isFinite(value) ? String(value) : 'NaN';
+        }
+        if (typeof value === 'string') {
+            return this.truncateText(value, 120);
+        }
+        return this.renderCompactJson(value, 160).replace(/\s+/g, ' ');
+    }
+
+    renderCompactJson(value, limit = 1200) {
+        if (typeof value === 'string') {
+            return this.truncateText(value, limit);
+        }
+        try {
+            return this.truncateText(JSON.stringify(value, null, 2), limit);
+        } catch (e) {
+            return this.truncateText(String(value), limit);
+        }
     }
 
     safeJsonStringify(value, limit = 900) {
