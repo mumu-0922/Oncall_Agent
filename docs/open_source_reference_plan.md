@@ -85,14 +85,14 @@ Finding(status, severity, summary, evidence_refs, next_queries)
 
 目标：学习 HolmesGPT，把 WSL `/proc` demo 升级为 VPS 真实观测链。
 
-拟新增 MCP 工具：
+已落地/拟新增 MCP 工具：
 
 ```text
-list_active_alerts
-query_metric_instant
-query_metric_range
-query_alert_history
-search_service_logs
+list_active_alerts      # 已落地：Alertmanager /api/v2/alerts，只返回当前活跃告警
+query_metric_instant    # 已落地：Prometheus /api/v1/query
+query_metric_range      # 已落地：Prometheus /api/v1/query_range，带 max_points/series 限制
+query_alert_history     # 已落地：明确 history_available=false，不伪造 Alertmanager 历史
+search_service_logs     # 后续：Loki / journald / file provider 统一日志入口
 ```
 
 首选接入：
@@ -100,6 +100,22 @@ search_service_logs
 ```text
 Prometheus + node_exporter + Alertmanager
 ```
+
+参考 HolmesGPT 路径：
+
+```text
+reference-projects/holmesgpt/holmes/plugins/toolsets/prometheus/prometheus.py
+reference-projects/holmesgpt/holmes/plugins/toolsets/prometheus/utils.py
+reference-projects/holmesgpt/holmes/plugins/sources/prometheus/plugin.py
+reference-projects/holmesgpt/holmes/plugins/sources/prometheus/models.py
+```
+
+本项目改写约束：
+
+- Prometheus URL 为空时直接返回 `error` + `suggestion`，不 fallback 到 mock。
+- HTTP/API 失败返回真实 `status_code/body/errorType`，不吞错。
+- `query_metric_range` 控制点数，超过 `AIOPS_PROMETHEUS_MAX_POINTS` 自动调大 `step` 并标记 `limited`。
+- Alertmanager 原生 API 不提供完整历史；`query_alert_history` 必须声明 `history_available=false`。
 
 ### Phase 4：告警中心与 workflow
 

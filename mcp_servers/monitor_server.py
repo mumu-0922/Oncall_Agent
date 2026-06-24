@@ -9,15 +9,20 @@
 用于支持运维 Agent 的故障排查场景。
 """
 
-import logging
 import functools
 import json
+import logging
+import math
 import os
 import random
+import re
 import time
-from typing import Dict, Any, Optional
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import Any
+from urllib.parse import urljoin
+
+import httpx
 from fastmcp import FastMCP
 
 try:
@@ -45,7 +50,7 @@ def log_tool_call(func):
         method_name = func.__name__
 
         # 记录调用信息
-        logger.info(f"=" * 80)
+        logger.info("=" * 80)
         logger.info(f"调用方法: {method_name}")
 
         # 记录参数（排除self等）
@@ -64,7 +69,7 @@ def log_tool_call(func):
             result = func(*args, **kwargs)
 
             # 记录返回状态
-            logger.info(f"返回状态: SUCCESS")
+            logger.info("返回状态: SUCCESS")
 
             # 记录返回结果摘要（避免日志过长）
             if isinstance(result, dict):
@@ -74,14 +79,14 @@ def log_tool_call(func):
             else:
                 logger.info(f"返回结果: {result}")
 
-            logger.info(f"=" * 80)
+            logger.info("=" * 80)
             return result
 
         except Exception as e:
             # 记录错误状态
-            logger.error(f"返回状态: ERROR")
+            logger.error("返回状态: ERROR")
             logger.error(f"错误信息: {str(e)}")
-            logger.error(f"=" * 80)
+            logger.error("=" * 80)
             raise
 
     return wrapper
@@ -91,7 +96,7 @@ def log_tool_call(func):
 # 辅助函数
 # ============================================================
 
-def parse_time_or_default(time_str: Optional[str], default_offset_hours: int = 0) -> datetime:
+def parse_time_or_default(time_str: str | None, default_offset_hours: int = 0) -> datetime:
     """解析时间字符串或返回默认时间。
 
     Args:
@@ -128,6 +133,7 @@ def generate_time_series(base_time: datetime, minutes_offset: int, format_str: s
 LOCAL_SAMPLE_SECONDS = float(os.getenv("AIOPS_LOCAL_SAMPLE_SECONDS", "0.25"))
 LOCAL_PROVIDER_NAMES = {"local", "local_vps", "local_wsl", "wsl", "vps", "procfs"}
 MOCK_PROVIDER_NAMES = {"mock", "demo", "sample"}
+PROMETHEUS_PROVIDER_NAMES = {"prometheus", "prom", "prometheus_vps"}
 
 
 def _monitor_provider() -> str:
@@ -146,14 +152,24 @@ def _is_mock_provider() -> bool:
     return _monitor_provider() in MOCK_PROVIDER_NAMES
 
 
-def _provider_error_response(service_name: str, metric_name: str, interval: str) -> Dict[str, Any]:
+def _is_prometheus_provider() -> bool:
+    return _monitor_provider() in PROMETHEUS_PROVIDER_NAMES
+
+
+def _provider_error_response(service_name: str, metric_name: str, interval: str) -> dict[str, Any]:
     provider = _monitor_provider()
     if _is_mock_provider() and not _allow_mock_provider():
         error = "AIOps mock 监控数据已被禁用；拒绝返回假 CPU/内存曲线。"
-        suggestion = "设置 AIOPS_MONITOR_PROVIDER=local_wsl/local_vps，或仅演示时显式设置 AIOPS_ALLOW_MOCK=true。"
+        suggestion = (
+            "设置 AIOPS_MONITOR_PROVIDER=local_wsl/local_vps/prometheus，"
+            "或仅演示时显式设置 AIOPS_ALLOW_MOCK=true。"
+        )
     else:
         error = f"未配置可用监控数据源: AIOPS_MONITOR_PROVIDER={provider}"
-        suggestion = "设置 AIOPS_MONITOR_PROVIDER=local_wsl/local_vps，并配置 AIOPS_SERVICE_PROCESS_MAP。"
+        suggestion = (
+            "设置 AIOPS_MONITOR_PROVIDER=local_wsl/local_vps 并配置 AIOPS_SERVICE_PROCESS_MAP；"
+            "或设置 AIOPS_MONITOR_PROVIDER=prometheus 并配置 AIOPS_PROMETHEUS_URL。"
+        )
     return {
         "service_name": service_name,
         "metric_name": metric_name,
@@ -171,6 +187,697 @@ def _provider_error_response(service_name: str, metric_name: str, interval: str)
         "error": error,
         "suggestion": suggestion,
     }
+
+
+def _prometheus_url() -> str:
+    return os.getenv("AIOPS_PROMETHEUS_URL", "").strip().rstrip("/")
+
+
+def _alertmanager_url() -> str:
+    return os.getenv("AIOPS_ALERTMANAGER_URL", "").strip().rstrip("/")
+
+
+def _prometheus_timeout_seconds() -> float:
+    raw = os.getenv("AIOPS_PROMETHEUS_TIMEOUT_SECONDS", "20").strip()
+    try:
+        return max(1.0, float(raw))
+    except ValueError:
+        logger.warning("AIOPS_PROMETHEUS_TIMEOUT_SECONDS=%s 非法，使用 20s", raw)
+        return 20.0
+
+
+def _prometheus_max_points(default: int = 500) -> int:
+    raw = os.getenv("AIOPS_PROMETHEUS_MAX_POINTS", str(default)).strip()
+    try:
+        return max(1, int(raw))
+    except ValueError:
+        logger.warning("AIOPS_PROMETHEUS_MAX_POINTS=%s 非法，使用 %s", raw, default)
+        return default
+
+
+def _prometheus_max_series(default: int = 50) -> int:
+    raw = os.getenv("AIOPS_PROMETHEUS_MAX_SERIES", str(default)).strip()
+    try:
+        return max(1, int(raw))
+    except ValueError:
+        logger.warning("AIOPS_PROMETHEUS_MAX_SERIES=%s 非法，使用 %s", raw, default)
+        return default
+
+
+def _http_headers(prefix: str = "AIOPS_PROMETHEUS") -> dict[str, str]:
+    """从环境变量构造只读 HTTP headers；常用于 Bearer/Basic 鉴权。"""
+    headers: dict[str, str] = {}
+    raw_json = os.getenv(f"{prefix}_HEADERS", "").strip()
+    if raw_json:
+        try:
+            decoded = json.loads(raw_json)
+        except json.JSONDecodeError:
+            logger.warning("%s_HEADERS 不是合法 JSON，已忽略", prefix)
+        else:
+            if isinstance(decoded, dict):
+                headers.update({str(k): str(v) for k, v in decoded.items() if v is not None})
+    auth_header = os.getenv(f"{prefix}_AUTH_HEADER", "").strip()
+    if auth_header:
+        headers["Authorization"] = auth_header
+    elif prefix != "AIOPS_PROMETHEUS":
+        shared_auth_header = os.getenv("AIOPS_PROMETHEUS_AUTH_HEADER", "").strip()
+        if shared_auth_header:
+            headers["Authorization"] = shared_auth_header
+    return headers
+
+
+def _http_get_json(
+    url: str,
+    params: dict[str, Any] | None = None,
+    headers: dict[str, str] | None = None,
+    timeout: float = 20.0,
+) -> Any:
+    """GET JSON helper。
+
+    借鉴 HolmesGPT 的做法：HTTP 失败必须把 status/body/exception 返回给上层，
+    不吞错、不伪造空结果。
+    """
+    try:
+        response = httpx.get(url, params=params or {}, headers=headers or {}, timeout=timeout)
+    except httpx.HTTPError as exc:
+        return {
+            "error": f"HTTP 请求失败: {type(exc).__name__}: {exc}",
+            "url": url,
+            "params": params or {},
+        }
+    if response.status_code != 200:
+        return {
+            "error": "HTTP 请求返回非 200 状态",
+            "url": url,
+            "params": params or {},
+            "status_code": response.status_code,
+            "body": response.text[:2000],
+        }
+    try:
+        return response.json()
+    except ValueError as exc:
+        return {
+            "error": f"HTTP 响应不是合法 JSON: {exc}",
+            "url": url,
+            "params": params or {},
+            "status_code": response.status_code,
+            "body": response.text[:2000],
+        }
+
+
+def _missing_prometheus_response(tool: str) -> dict[str, Any]:
+    provider = _monitor_provider()
+    return {
+        "tool": tool,
+        "source": f"prometheus:{_prometheus_url() or 'unconfigured'}",
+        "history_available": False,
+        "result_type": None,
+        "result_count": 0,
+        "results": [],
+        "error": (
+            "Prometheus 未配置，无法查询真实指标。"
+            f"当前 AIOPS_MONITOR_PROVIDER={provider}, AIOPS_PROMETHEUS_URL 为空。"
+        ),
+        "suggestion": (
+            "在 VPS 上部署/暴露 Prometheus 后设置 "
+            "AIOPS_MONITOR_PROVIDER=prometheus 和 AIOPS_PROMETHEUS_URL=http://127.0.0.1:9090。"
+        ),
+    }
+
+
+def _missing_alertmanager_response(tool: str) -> dict[str, Any]:
+    return {
+        "tool": tool,
+        "source": "alertmanager:unconfigured",
+        "history_available": False,
+        "total": 0,
+        "alerts": [],
+        "error": "Alertmanager 未配置，无法查询真实告警。",
+        "suggestion": (
+            "部署/暴露 Alertmanager 后设置 "
+            "AIOPS_ALERTMANAGER_URL=http://127.0.0.1:9093。"
+        ),
+    }
+
+
+def _prometheus_api_error(
+    *,
+    tool: str,
+    url: str,
+    query: str | None,
+    payload: Any,
+    history_available: bool,
+) -> dict[str, Any]:
+    payload_dict = payload if isinstance(payload, dict) else {}
+    error = payload_dict.get("error") or payload_dict.get("errorType") or "Prometheus API 查询失败"
+    return {
+        "tool": tool,
+        "query": query,
+        "source": f"prometheus:{_prometheus_url()}",
+        "history_available": history_available,
+        "result_type": None,
+        "result_count": 0,
+        "results": [],
+        "error": str(error),
+        "status_code": payload_dict.get("status_code"),
+        "body": payload_dict.get("body"),
+        "api_status": payload_dict.get("status"),
+        "api_error_type": payload_dict.get("errorType"),
+        "url": url,
+    }
+
+
+def _parse_duration_seconds(value: str | int | float | None, default: float = 60.0) -> float:
+    """解析 Prometheus duration，形如 60s/1m/1h30m。"""
+    if value is None:
+        return default
+    if isinstance(value, int | float):
+        return max(1.0, float(value))
+    raw = str(value).strip().lower()
+    if not raw:
+        return default
+    if raw.replace(".", "", 1).isdigit():
+        return max(1.0, float(raw))
+    units = {"s": 1.0, "m": 60.0, "h": 3600.0, "d": 86400.0}
+    matches = list(re.finditer(r"(\d+(?:\.\d+)?)([smhd])", raw))
+    if not matches:
+        raise ValueError(f"非法 step/duration: {value}")
+    total = sum(float(match.group(1)) * units[match.group(2)] for match in matches)
+    return max(1.0, total)
+
+
+def _format_duration_seconds(seconds: float) -> str:
+    seconds_int = max(1, int(math.ceil(seconds)))
+    # Prometheus 接受秒级 duration；这里保持 Ns，方便审计“自动调大到了多少秒”。
+    return f"{seconds_int}s"
+
+
+def _parse_prometheus_time(value: str | int | float | None, *, default: datetime | None = None) -> float:
+    """解析 Prometheus time/range 参数为 epoch seconds。"""
+    if value is None or value == "":
+        base = default or datetime.now()
+        return base.timestamp()
+    if isinstance(value, int | float):
+        numeric = float(value)
+        return numeric / 1000 if numeric > 10_000_000_000 else numeric
+    raw = str(value).strip()
+    try:
+        numeric = float(raw)
+    except ValueError:
+        normalized = raw.replace("Z", "+00:00")
+        try:
+            return datetime.fromisoformat(normalized).timestamp()
+        except ValueError:
+            return datetime.strptime(raw, "%Y-%m-%d %H:%M:%S").timestamp()
+    return numeric / 1000 if numeric > 10_000_000_000 else numeric
+
+
+def _safe_float(value: Any) -> float | None:
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return None
+    return parsed if math.isfinite(parsed) else None
+
+
+def _percentile(values: list[float], percentile: float) -> float | None:
+    if not values:
+        return None
+    ordered = sorted(values)
+    index = min(len(ordered) - 1, max(0, math.ceil((len(ordered) * percentile) / 100) - 1))
+    return round(ordered[index], 4)
+
+
+def _metric_statistics(values: list[float]) -> dict[str, Any]:
+    if not values:
+        return {}
+    return {
+        "min": round(min(values), 4),
+        "max": round(max(values), 4),
+        "avg": round(sum(values) / len(values), 4),
+        "p95": _percentile(values, 95),
+        "sample_count": len(values),
+    }
+
+
+def _copy_prometheus_results_limited(
+    results: list[dict[str, Any]], max_series: int
+) -> tuple[list[dict[str, Any]], bool]:
+    if len(results) <= max_series:
+        return results, False
+    return results[:max_series], True
+
+
+def _values_from_prometheus_results(results: list[dict[str, Any]]) -> list[float]:
+    values: list[float] = []
+    for series in results:
+        if "value" in series and isinstance(series["value"], list) and len(series["value"]) >= 2:
+            parsed = _safe_float(series["value"][1])
+            if parsed is not None:
+                values.append(parsed)
+        for point in series.get("values") or []:
+            if isinstance(point, list) and len(point) >= 2:
+                parsed = _safe_float(point[1])
+                if parsed is not None:
+                    values.append(parsed)
+    return values
+
+
+def _data_points_from_prometheus_matrix(results: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    points: list[dict[str, Any]] = []
+    for series_index, series in enumerate(results):
+        metric = series.get("metric") if isinstance(series.get("metric"), dict) else {}
+        for point in series.get("values") or []:
+            if not isinstance(point, list) or len(point) < 2:
+                continue
+            value = _safe_float(point[1])
+            if value is None:
+                continue
+            timestamp = float(point[0])
+            points.append(
+                {
+                    "timestamp": datetime.fromtimestamp(timestamp).strftime("%Y-%m-%d %H:%M:%S"),
+                    "value": round(value, 4),
+                    "series_index": series_index,
+                    "metric": metric,
+                }
+            )
+    return points
+
+
+def _format_query_template(template: str, service_name: str) -> str:
+    matched_service, patterns = _service_patterns(service_name)
+    # PromQL 本身大量使用 `{label="value"}`，不能直接 str.format；
+    # 只替换本项目支持的占位符，保留 PromQL label selector 花括号。
+    replacements = {
+        "{service_name}": service_name,
+        "{matched_service}": matched_service,
+        "{first_pattern}": patterns[0] if patterns else service_name,
+    }
+    rendered = template
+    for placeholder, value in replacements.items():
+        rendered = rendered.replace(placeholder, value)
+    return rendered
+
+
+def _default_cpu_promql(service_name: str) -> str:
+    template = os.getenv(
+        "AIOPS_PROMETHEUS_CPU_QUERY_TEMPLATE",
+        "100 * (1 - avg(rate(node_cpu_seconds_total{mode=\"idle\"}[5m])))",
+    )
+    return _format_query_template(template, service_name)
+
+
+def _default_memory_promql(service_name: str) -> str:
+    template = os.getenv(
+        "AIOPS_PROMETHEUS_MEMORY_QUERY_TEMPLATE",
+        "100 * (1 - (node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes))",
+    )
+    return _format_query_template(template, service_name)
+
+
+def _prometheus_metric_response(
+    *,
+    service_name: str,
+    metric_name: str,
+    query: str,
+    start_time: str | None,
+    end_time: str | None,
+    interval: str,
+    threshold: float,
+    alert_message: str,
+    normal_message: str,
+) -> dict[str, Any]:
+    range_result = query_metric_range(
+        query=query,
+        start_time=start_time
+        or (datetime.now() - timedelta(hours=1)).strftime("%Y-%m-%d %H:%M:%S"),
+        end_time=end_time or datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        step=interval,
+    )
+    if range_result.get("error"):
+        return {
+            "service_name": service_name,
+            "metric_name": metric_name,
+            "interval": interval,
+            **range_result,
+        }
+    statistics = range_result.get("statistics") or {}
+    max_value = _safe_float(statistics.get("max")) or 0.0
+    triggered = max_value > threshold
+    return {
+        "service_name": service_name,
+        "metric_name": metric_name,
+        "interval": interval,
+        "source": range_result.get("source"),
+        "history_available": True,
+        "query": query,
+        "data_points": _data_points_from_prometheus_matrix(range_result.get("results") or []),
+        "statistics": statistics,
+        "series_count": range_result.get("series_count"),
+        "point_count": range_result.get("point_count"),
+        "limited": range_result.get("limited", False),
+        "limit_reason": range_result.get("limit_reason"),
+        "alert_info": {
+            "triggered": triggered,
+            "threshold": threshold,
+            "message": alert_message if triggered else normal_message,
+        },
+        "raw_result": range_result,
+    }
+
+
+@mcp.tool()
+@log_tool_call
+def query_metric_instant(query: str, time: str | None = None) -> dict[str, Any]:
+    """执行 Prometheus instant query。
+
+    参考 HolmesGPT 的 execute_prometheus_instant_query 形态：只读 Prometheus，
+    未配置或 HTTP/API 失败时直接返回真实错误，不编造指标。
+    """
+    base_url = _prometheus_url()
+    if not base_url:
+        response = _missing_prometheus_response("query_metric_instant")
+        response["query"] = query
+        response["time"] = time
+        return response
+
+    url = urljoin(f"{base_url}/", "api/v1/query")
+    params: dict[str, Any] = {"query": query}
+    if time:
+        params["time"] = time
+    payload = _http_get_json(
+        url,
+        params=params,
+        headers=_http_headers("AIOPS_PROMETHEUS"),
+        timeout=_prometheus_timeout_seconds(),
+    )
+    if not isinstance(payload, dict) or payload.get("error") or payload.get("status") != "success":
+        return _prometheus_api_error(
+            tool="query_metric_instant",
+            url=url,
+            query=query,
+            payload=payload,
+            history_available=False,
+        )
+
+    data = payload.get("data") if isinstance(payload.get("data"), dict) else {}
+    result_type = data.get("resultType")
+    raw_result = data.get("result")
+    results = raw_result if isinstance(raw_result, list) else []
+    max_series = _prometheus_max_series()
+    limited_results, series_limited = _copy_prometheus_results_limited(
+        [item for item in results if isinstance(item, dict)], max_series
+    )
+    values = _values_from_prometheus_results(limited_results)
+    if result_type == "scalar" and isinstance(raw_result, list) and len(raw_result) >= 2:
+        scalar = _safe_float(raw_result[1])
+        if scalar is not None:
+            values.append(scalar)
+
+    original_count = len(results) if isinstance(results, list) else (1 if raw_result else 0)
+    return {
+        "tool": "query_metric_instant",
+        "query": query,
+        "time": time,
+        "source": f"prometheus:{base_url}",
+        "history_available": False,
+        "result_type": result_type,
+        "result_count": original_count,
+        "series_count": original_count if result_type == "vector" else 0,
+        "returned_series_count": len(limited_results),
+        "limited": series_limited,
+        "limit_reason": (
+            f"结果序列数 {original_count} 超过 AIOPS_PROMETHEUS_MAX_SERIES={max_series}，已截断返回。"
+            if series_limited
+            else None
+        ),
+        "results": limited_results if result_type == "vector" else raw_result,
+        "statistics": _metric_statistics(values),
+        "api_warnings": payload.get("warnings") or [],
+    }
+
+
+@mcp.tool()
+@log_tool_call
+def query_metric_range(
+    query: str,
+    start_time: str,
+    end_time: str,
+    step: str = "60s",
+    max_points: int | None = None,
+) -> dict[str, Any]:
+    """执行 Prometheus range query。
+
+    借鉴 HolmesGPT 的点数预算：若时间跨度/step 会产生过多点，自动调大 step，
+    并在响应中标记 limited/limit_reason，绝不假装完整。
+    """
+    base_url = _prometheus_url()
+    if not base_url:
+        response = _missing_prometheus_response("query_metric_range")
+        response.update({"query": query, "start_time": start_time, "end_time": end_time, "step": step})
+        return response
+
+    try:
+        start_epoch = _parse_prometheus_time(start_time)
+        end_epoch = _parse_prometheus_time(end_time)
+        step_seconds = _parse_duration_seconds(step, default=60.0)
+    except ValueError as exc:
+        return {
+            "tool": "query_metric_range",
+            "query": query,
+            "start_time": start_time,
+            "end_time": end_time,
+            "step": step,
+            "source": f"prometheus:{base_url}",
+            "history_available": False,
+            "results": [],
+            "statistics": {},
+            "error": f"时间或 step 参数非法: {exc}",
+        }
+
+    if end_epoch <= start_epoch:
+        return {
+            "tool": "query_metric_range",
+            "query": query,
+            "start_time": start_time,
+            "end_time": end_time,
+            "step": step,
+            "source": f"prometheus:{base_url}",
+            "history_available": False,
+            "results": [],
+            "statistics": {},
+            "error": "end_time 必须晚于 start_time",
+        }
+
+    configured_max_points = max_points if max_points is not None else _prometheus_max_points()
+    configured_max_points = max(1, int(configured_max_points))
+    requested_points = int(math.floor((end_epoch - start_epoch) / step_seconds)) + 1
+    effective_step_seconds = step_seconds
+    limited = False
+    limit_reason = None
+    if requested_points > configured_max_points:
+        effective_step_seconds = math.ceil((end_epoch - start_epoch) / max(configured_max_points - 1, 1))
+        limited = True
+        limit_reason = (
+            f"请求点数 {requested_points} 超过 max_points={configured_max_points}，"
+            f"step 已从 {step} 调整为 {_format_duration_seconds(effective_step_seconds)}。"
+        )
+
+    effective_step = _format_duration_seconds(effective_step_seconds) if limited else step
+    url = urljoin(f"{base_url}/", "api/v1/query_range")
+    params = {
+        "query": query,
+        "start": start_epoch,
+        "end": end_epoch,
+        "step": effective_step,
+    }
+    payload = _http_get_json(
+        url,
+        params=params,
+        headers=_http_headers("AIOPS_PROMETHEUS"),
+        timeout=_prometheus_timeout_seconds(),
+    )
+    if not isinstance(payload, dict) or payload.get("error") or payload.get("status") != "success":
+        return _prometheus_api_error(
+            tool="query_metric_range",
+            url=url,
+            query=query,
+            payload=payload,
+            history_available=False,
+        )
+
+    data = payload.get("data") if isinstance(payload.get("data"), dict) else {}
+    result_type = data.get("resultType")
+    raw_results = data.get("result")
+    all_results = (
+        [item for item in raw_results if isinstance(item, dict)]
+        if isinstance(raw_results, list)
+        else []
+    )
+    max_series = _prometheus_max_series()
+    results, series_limited = _copy_prometheus_results_limited(all_results, max_series)
+    values = _values_from_prometheus_results(results)
+    point_count = sum(len(series.get("values") or []) for series in results)
+    limited = limited or series_limited
+    if series_limited:
+        series_reason = (
+            f"结果序列数 {len(all_results)} 超过 AIOPS_PROMETHEUS_MAX_SERIES={max_series}，已截断返回。"
+        )
+        limit_reason = f"{limit_reason} {series_reason}" if limit_reason else series_reason
+
+    return {
+        "tool": "query_metric_range",
+        "query": query,
+        "start_time": start_time,
+        "end_time": end_time,
+        "start": start_epoch,
+        "end": end_epoch,
+        "step": effective_step,
+        "requested_step": step,
+        "source": f"prometheus:{base_url}",
+        "history_available": True,
+        "result_type": result_type,
+        "series_count": len(all_results),
+        "returned_series_count": len(results),
+        "point_count": point_count,
+        "requested_points_per_series": requested_points,
+        "max_points": configured_max_points,
+        "limited": limited,
+        "limit_reason": limit_reason,
+        "results": results,
+        "statistics": _metric_statistics(values),
+        "api_warnings": payload.get("warnings") or [],
+    }
+
+
+def _parse_alertmanager_time(value: Any) -> datetime | None:
+    if not value:
+        return None
+    if isinstance(value, datetime):
+        return value
+    raw = str(value).strip()
+    if not raw:
+        return None
+    try:
+        parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=UTC)
+    return parsed.astimezone(UTC)
+
+
+def _normalize_alertmanager_alert(alert: dict[str, Any]) -> dict[str, Any]:
+    labels = alert.get("labels") if isinstance(alert.get("labels"), dict) else {}
+    annotations = alert.get("annotations") if isinstance(alert.get("annotations"), dict) else {}
+    status = alert.get("status") if isinstance(alert.get("status"), dict) else {}
+    starts_at = alert.get("startsAt")
+    ends_at = alert.get("endsAt")
+    started = _parse_alertmanager_time(starts_at)
+    ended = _parse_alertmanager_time(ends_at)
+    if started and ended and ended.year > 1:
+        duration_seconds = max(0.0, (ended - started).total_seconds())
+    elif started:
+        duration_seconds = max(0.0, (datetime.now(UTC) - started).total_seconds())
+    else:
+        duration_seconds = None
+    return {
+        "alertname": labels.get("alertname", ""),
+        "severity": labels.get("severity", ""),
+        "status": status.get("state") or alert.get("status") or "",
+        "startsAt": starts_at,
+        "endsAt": ends_at,
+        "fingerprint": alert.get("fingerprint", ""),
+        "labels": labels,
+        "annotations": annotations,
+        "generatorURL": alert.get("generatorURL", ""),
+        "duration_seconds": round(duration_seconds, 3) if duration_seconds is not None else None,
+    }
+
+
+@mcp.tool()
+@log_tool_call
+def list_active_alerts(label_filter: str | None = None) -> dict[str, Any]:
+    """从 Alertmanager /api/v2/alerts 拉取当前活跃告警。"""
+    base_url = _alertmanager_url()
+    if not base_url:
+        return _missing_alertmanager_response("list_active_alerts")
+
+    url = urljoin(f"{base_url}/", "api/v2/alerts")
+    params: dict[str, Any] = {
+        "active": "true",
+        "silenced": "false",
+        "inhibited": "false",
+    }
+    if label_filter:
+        params["filter"] = label_filter
+    payload = _http_get_json(
+        url,
+        params=params,
+        headers=_http_headers("AIOPS_ALERTMANAGER"),
+        timeout=_prometheus_timeout_seconds(),
+    )
+    if isinstance(payload, dict) and payload.get("error"):
+        return {
+            "tool": "list_active_alerts",
+            "source": f"alertmanager:{base_url}",
+            "history_available": False,
+            "total": 0,
+            "alerts": [],
+            "error": str(payload.get("error")),
+            "status_code": payload.get("status_code"),
+            "body": payload.get("body"),
+            "url": url,
+        }
+    if not isinstance(payload, list):
+        return {
+            "tool": "list_active_alerts",
+            "source": f"alertmanager:{base_url}",
+            "history_available": False,
+            "total": 0,
+            "alerts": [],
+            "error": f"Alertmanager 响应格式异常，期望 list，实际 {type(payload).__name__}",
+            "url": url,
+        }
+    alerts = [_normalize_alertmanager_alert(item) for item in payload if isinstance(item, dict)]
+    return {
+        "tool": "list_active_alerts",
+        "source": f"alertmanager:{base_url}",
+        "history_available": False,
+        "label_filter": label_filter,
+        "total": len(alerts),
+        "alerts": alerts,
+    }
+
+
+@mcp.tool()
+@log_tool_call
+def query_alert_history(start_time: str | None = None, end_time: str | None = None) -> dict[str, Any]:
+    """查询告警历史。
+
+    Alertmanager 原生 API 只可靠暴露当前可取告警，不提供完整历史；
+    因此这里明确返回 history_available=false，不伪造历史。
+    """
+    current = list_active_alerts()
+    alerts = current.get("alerts", []) if isinstance(current, dict) else []
+    response = {
+        "tool": "query_alert_history",
+        "source": current.get("source") if isinstance(current, dict) else "alertmanager:unknown",
+        "start_time": start_time,
+        "end_time": end_time,
+        "history_available": False,
+        "message": (
+            "Alertmanager /api/v2/alerts 只暴露当前 gettable alerts；"
+            "若要真实历史，请接入长期事件库/告警归档/Prometheus ALERTS_FOR_STATE 查询。"
+        ),
+        "alerts": alerts,
+        "total": len(alerts),
+    }
+    if isinstance(current, dict) and current.get("error"):
+        response["error"] = current.get("error")
+        response["suggestion"] = current.get("suggestion")
+    return response
 
 
 def _load_json_env(name: str) -> dict[str, Any]:
@@ -390,7 +1097,7 @@ def _single_point_response(
     threshold: float,
     alert_message: str,
     normal_message: str,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     now = datetime.now()
     value = float(snapshot["value"])
     triggered = value > threshold
@@ -436,28 +1143,28 @@ def _single_point_response(
 @log_tool_call
 def query_cpu_metrics(
     service_name: str,
-    start_time: Optional[str] = None,
-    end_time: Optional[str] = None,
-    interval: str = "1m"
-) -> Dict[str, Any]:
+    start_time: str | None = None,
+    end_time: str | None = None,
+    interval: str = "1m",
+) -> dict[str, Any]:
     """查询服务的 CPU 使用率监控数据。
 
     Args:
         service_name: 服务名称（必填）
             示例: "data-sync-service"
-        
+
         start_time: 开始时间（可选，字符串类型）
             格式: "YYYY-MM-DD HH:MM:SS"
             示例: "2026-02-14 10:00:00"
             默认值: 如果不传，默认为当前时间的1小时前
             注意: 必须使用字符串格式，而非时间戳
-        
+
         end_time: 结束时间（可选，字符串类型）
             格式: "YYYY-MM-DD HH:MM:SS"
             示例: "2026-02-14 11:00:00"
             默认值: 如果不传，默认为当前时间
             注意: 必须使用字符串格式，而非时间戳
-        
+
         interval: 数据聚合间隔（可选）
             可选值: "1m" (1分钟), "5m" (5分钟), "1h" (1小时)
             默认值: "1m"
@@ -479,11 +1186,11 @@ def query_cpu_metrics(
                 * triggered: 是否触发告警
                 * threshold: 告警阈值
                 * message: 告警消息
-    
+
     使用示例:
         # 示例1: 使用默认时间（最近1小时）
         query_cpu_metrics(service_name="data-sync-service")
-        
+
         # 示例2: 指定时间范围
         query_cpu_metrics(
             service_name="data-sync-service",
@@ -491,7 +1198,7 @@ def query_cpu_metrics(
             end_time="2026-02-14 11:00:00",
             interval="5m"
         )
-        
+
         # 示例3: 只指定开始时间（结束时间自动为当前时间）
         query_cpu_metrics(
             service_name="data-sync-service",
@@ -509,13 +1216,25 @@ def query_cpu_metrics(
             alert_message="CPU 使用率超过 80% 阈值",
             normal_message="CPU 使用率未超过 80% 阈值",
         )
+    if _is_prometheus_provider():
+        return _prometheus_metric_response(
+            service_name=service_name,
+            metric_name="cpu_usage_percent",
+            query=_default_cpu_promql(service_name),
+            start_time=start_time,
+            end_time=end_time,
+            interval=interval,
+            threshold=80.0,
+            alert_message="Prometheus CPU 指标超过 80% 阈值",
+            normal_message="Prometheus CPU 指标未超过 80% 阈值",
+        )
     if not (_is_mock_provider() and _allow_mock_provider()):
         return _provider_error_response(service_name, "cpu_usage_percent", interval)
 
     # 解析时间参数
     start_dt = parse_time_or_default(start_time, default_offset_hours=-1)
     end_dt = parse_time_or_default(end_time, default_offset_hours=0)
-    
+
     # 解析间隔时间（interval: 1m, 5m, 1h 等）
     interval_minutes = 1  # 默认 1 分钟
     if interval.endswith('m'):
@@ -603,28 +1322,28 @@ def query_cpu_metrics(
 @log_tool_call
 def query_memory_metrics(
     service_name: str,
-    start_time: Optional[str] = None,
-    end_time: Optional[str] = None,
-    interval: str = "1m"
-) -> Dict[str, Any]:
+    start_time: str | None = None,
+    end_time: str | None = None,
+    interval: str = "1m",
+) -> dict[str, Any]:
     """查询服务的内存使用监控数据。
 
     Args:
         service_name: 服务名称（必填）
             示例: "data-sync-service"
-        
+
         start_time: 开始时间（可选，字符串类型）
             格式: "YYYY-MM-DD HH:MM:SS"
             示例: "2026-02-14 10:00:00"
             默认值: 如果不传，默认为当前时间的1小时前
             注意: 必须使用字符串格式，而非时间戳
-        
+
         end_time: 结束时间（可选，字符串类型）
             格式: "YYYY-MM-DD HH:MM:SS"
             示例: "2026-02-14 11:00:00"
             默认值: 如果不传，默认为当前时间
             注意: 必须使用字符串格式，而非时间戳
-        
+
         interval: 数据聚合间隔（可选）
             可选值: "1m" (1分钟), "5m" (5分钟), "1h" (1小时)
             默认值: "1m"
@@ -647,11 +1366,11 @@ def query_memory_metrics(
                 * triggered: 是否触发告警
                 * threshold: 告警阈值
                 * message: 告警消息
-    
+
     使用示例:
         # 示例1: 使用默认时间（最近1小时）
         query_memory_metrics(service_name="data-sync-service")
-        
+
         # 示例2: 指定时间范围
         query_memory_metrics(
             service_name="data-sync-service",
@@ -671,35 +1390,47 @@ def query_memory_metrics(
             alert_message="内存使用率超过 70% 阈值，存在内存压力",
             normal_message="内存使用率未超过 70% 阈值",
         )
+    if _is_prometheus_provider():
+        return _prometheus_metric_response(
+            service_name=service_name,
+            metric_name="memory_usage_percent",
+            query=_default_memory_promql(service_name),
+            start_time=start_time,
+            end_time=end_time,
+            interval=interval,
+            threshold=70.0,
+            alert_message="Prometheus 内存指标超过 70% 阈值，存在内存压力",
+            normal_message="Prometheus 内存指标未超过 70% 阈值",
+        )
     if not (_is_mock_provider() and _allow_mock_provider()):
         return _provider_error_response(service_name, "memory_usage_percent", interval)
 
     # 解析时间参数
     start_dt = parse_time_or_default(start_time, default_offset_hours=-1)
     end_dt = parse_time_or_default(end_time, default_offset_hours=0)
-    
+
     # 解析间隔时间（interval: 1m, 5m, 1h 等）
     interval_minutes = 1  # 默认 1 分钟
     if interval.endswith('m'):
         interval_minutes = int(interval[:-1])
     elif interval.endswith('h'):
         interval_minutes = int(interval[:-1]) * 60
-    
+
     # 动态生成内存使用率数据：从低到高逐渐增长
     data_points = []
     current_time = start_dt
     time_index = 0
-    
+
     # 初始内存使用率（30%）
     base_memory = 30.0
     total_gb = 8.0  # 总内存 8GB
-    
+
     while current_time <= end_dt:
         # 内存使用率逐渐升高的算法：
         # - 前几个数据点保持在 30% 左右
         # - 然后开始逐步上升
         # - 最终达到 85% 左右
-        
+
         if time_index < 3:
             # 初始阶段：30% 左右波动
             memory_value = base_memory + (time_index * 1.0)
@@ -707,37 +1438,37 @@ def query_memory_metrics(
             # 上升阶段：使用线性增长模型（内存增长比 CPU 慢）
             growth_factor = (time_index - 2) * 5.5
             memory_value = min(base_memory + growth_factor, 85.0)
-        
+
         # 添加一些随机波动（±1%）
         memory_value = round(memory_value + random.uniform(-1, 1), 1)
         memory_value = max(0, min(100, memory_value))  # 确保在 0-100 范围内
-        
+
         # 计算已使用内存（GB）
         used_gb = round((memory_value / 100.0) * total_gb, 2)
-        
+
         data_point = {
             "timestamp": current_time.strftime("%H:%M"),
             "value": memory_value,
             "used_gb": used_gb,
             "total_gb": total_gb
         }
-        
+
         data_points.append(data_point)
-        
+
         # 下一个时间点
         current_time += timedelta(minutes=interval_minutes)
         time_index += 1
-    
+
     # 计算统计信息
     if data_points:
         values = [d["value"] for d in data_points]
         avg_value = round(sum(values) / len(values), 2)
         max_value = max(values)
         min_value = min(values)
-        
+
         # 检测是否有内存压力（超过 70%）
         memory_pressure = max_value > 70.0
-        
+
         return {
             "service_name": service_name,
             "metric_name": "memory_usage_percent",

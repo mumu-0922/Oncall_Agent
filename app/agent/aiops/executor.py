@@ -26,7 +26,6 @@ from .utils import (
     message_to_text,
 )
 
-
 _KNOWN_AIOPS_TOOL_NAMES = {
     "get_current_time",
     "retrieve_knowledge",
@@ -36,6 +35,10 @@ _KNOWN_AIOPS_TOOL_NAMES = {
     "search_log",
     "query_cpu_metrics",
     "query_memory_metrics",
+    "query_metric_instant",
+    "query_metric_range",
+    "list_active_alerts",
+    "query_alert_history",
 }
 _NEGATED_TOOL_PREFIX_RE = re.compile(
     r"(禁止|不要|不得|不能|不可|不应|无需|无须|不需要|别|避免|拒绝)(?:[\s\S]{0,8})$"
