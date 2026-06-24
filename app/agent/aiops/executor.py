@@ -33,6 +33,7 @@ _KNOWN_AIOPS_TOOL_NAMES = {
     "get_region_code_by_name",
     "search_topic_by_service_name",
     "search_log",
+    "search_local_logs",
     "query_cpu_metrics",
     "query_memory_metrics",
     "query_metric_instant",

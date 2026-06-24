@@ -60,7 +60,7 @@ planner_prompt = ChatPromptTemplate.from_messages(
                 示例计划：
                 1. 使用 query_cpu_metrics 工具查询默认/已配置核心服务 CPU 指标，确认是否超过阈值；若工具返回 error，记录原始错误并停止伪推断
                 2. 使用 search_topic_by_service_name 工具查找同一服务对应日志 topic；若未找到，记录原始错误并说明日志证据缺失
-                3. 使用 get_current_timestamp 与 search_log 工具查询最近 15 分钟 ERROR 日志，寻找与 CPU 异常相关的证据
+                3. 优先使用 search_local_logs 工具按服务名直查最近 15 分钟 ERROR 日志；若需要兼容 topic 流程，再使用 get_current_timestamp 与 search_log，寻找与 CPU 异常相关的证据
             """).strip(),
         ),
         ("placeholder", "{messages}"),

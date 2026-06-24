@@ -12,7 +12,8 @@
 - `get_topic_info_by_name` - 查询日志主题
 - `get_region_code_by_name` - 查询地区代码；本机模式支持 `local/vps/本机/本地`
 - `search_topic_by_service_name` - 根据服务名查找日志 topic
-- `search_log` - 日志搜索
+- `search_log` - topic 方式日志搜索
+- `search_local_logs` - 按服务名直查本机/WSL/VPS 日志白名单文件
 
 ### Monitor Server (`monitor_server.py`)
 **监控数据服务** - 端口 8004
@@ -59,7 +60,8 @@ Agent 自动执行:
 2. query_cpu_metrics("data-sync-service") → CPU 指标；Prometheus 可用时查真实历史曲线
 3. query_memory_metrics("data-sync-service") → 内存指标；Prometheus 可用时查真实历史曲线
 4. search_topic_by_service_name("data-sync-service") → 查找日志 topic
-5. search_log(topic_id, start_time, end_time, query="level:ERROR OR level:WARN") → 同窗口错误日志
+5. search_local_logs(service_name="data-sync-service", query="level:ERROR OR level:WARN") → 按服务名直查同窗口错误日志
+   - 兼容链路：search_log(topic_id, start_time, end_time, query="level:ERROR OR level:WARN")
 6. Evidence Package + Analyzer Findings → 生成诊断报告；没证据则返回证据不足
 ```
 
@@ -91,7 +93,17 @@ query_metric_range(
 list_active_alerts(label_filter='severity="critical"')
 ```
 
-**搜索错误日志：**
+**按服务名搜索本机错误日志（推荐）：**
+```python
+search_local_logs(
+    service_name="super-biz-agent",
+    query="level:ERROR OR timeout",
+    window_minutes=60,
+    limit=100
+)
+```
+
+**按 topic 搜索错误日志（兼容）：**
 ```python
 search_log(
     topic_id="local:super-biz-agent",

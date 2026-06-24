@@ -12,7 +12,6 @@ import re
 from collections.abc import Mapping
 from typing import Any
 
-from app.agent.aiops.analyzers.rules import run_analyzers
 from app.models.evidence import EvidenceItem, EvidenceKind, EvidencePackage
 from app.services.chat_trace_service import ChatTraceObserver
 
@@ -29,7 +28,7 @@ _ERROR_MARKERS = (
     "timed out",
 )
 _METRIC_TOOLS = {"query_cpu_metrics", "query_memory_metrics", "query_metric_range", "query_metric_instant"}
-_LOG_TOOLS = {"search_log", "search_service_logs"}
+_LOG_TOOLS = {"search_log", "search_local_logs", "search_service_logs"}
 _RUNBOOK_TOOLS = {"retrieve_knowledge"}
 _ALERT_TOOL_HINTS = ("alert", "告警")
 _NUMBERED_TOOL_RESULT_RE = re.compile(
@@ -64,7 +63,7 @@ class EvidencePackageService:
 
         service_names = self._extract_service_names(items)
         time_range = self._extract_time_range(items)
-        findings = run_analyzers(items)
+        findings = self._run_analyzers(items)
         limitations = self._extract_limitations(items, findings)
         confidence = self._confidence(
             alerts=alerts,
@@ -89,6 +88,12 @@ class EvidencePackageService:
             limitations=limitations,
             confidence=confidence,
         )
+
+    def _run_analyzers(self, items: list[EvidenceItem]) -> list[Any]:
+        """惰性导入 analyzer，避免 app.agent.aiops package 初始化时循环导入 replanner。"""
+        from app.agent.aiops.analyzers.rules import run_analyzers
+
+        return run_analyzers(items)
 
     def render_insufficient_evidence_report(self, package: EvidencePackage) -> str:
         """在无可用事实证据时，生成确定性报告；不调用 LLM，避免补故事。"""
@@ -139,7 +144,7 @@ class EvidencePackageService:
                 "## 下一步需要补齐",
                 "1. 查询真实活跃告警，例如 `list_active_alerts` 或 Alertmanager。",
                 "2. 查询时间范围内的指标曲线，例如 `query_metric_range` / `query_cpu_metrics` / `query_memory_metrics`。",
-                "3. 查询同一窗口内的错误日志，例如 `search_log` / `search_service_logs`。",
+                "3. 查询同一窗口内的错误日志，例如 `search_log` / `search_local_logs` / `search_service_logs`。",
                 "4. 若本地仅有 `/proc` 快照，应明确标记 `history_available=false`，不能伪造历史趋势。",
             ]
         )
