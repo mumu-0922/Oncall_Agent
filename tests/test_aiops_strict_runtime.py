@@ -21,6 +21,24 @@ async def dummy_mcp_tool(text: str = "ok") -> str:
     return text
 
 
+@tool
+async def query_cpu_metrics(service_name: str = "app") -> str:
+    """query cpu metrics"""
+    return f"cpu ok for {service_name}"
+
+
+@tool
+async def query_memory_metrics(service_name: str = "app") -> str:
+    """query memory metrics"""
+    return f"memory ok for {service_name}"
+
+
+@tool
+async def retrieve_knowledge(query: str = "q") -> str:
+    """retrieve knowledge"""
+    return f"knowledge for {query}"
+
+
 class DummyClient:
     def __init__(self, tools):
         self._tools = tools
@@ -359,6 +377,183 @@ async def test_executor_skips_second_llm_call_by_default(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_executor_limits_binding_to_explicit_step_tools(monkeypatch):
+    class CaptureBindingModel:
+        def __init__(self):
+            self.bound_tool_names = []
+            self.calls = 0
+
+        def bind_tools(self, tools, **kwargs):
+            self.bound_tool_names.append([tool.name for tool in tools])
+            return self
+
+        async def ainvoke(self, messages):
+            self.calls += 1
+            return AIMessage(
+                content="",
+                tool_calls=[
+                    {
+                        "name": "query_cpu_metrics",
+                        "args": {"service_name": "super-biz-agent"},
+                        "id": "call_cpu",
+                    },
+                    {
+                        "name": "query_memory_metrics",
+                        "args": {"service_name": "super-biz-agent"},
+                        "id": "call_mem",
+                    },
+                ],
+            )
+
+    model = CaptureBindingModel()
+
+    async def fake_load_tools():
+        return [retrieve_knowledge], [query_cpu_metrics, query_memory_metrics, dummy_mcp_tool]
+
+    monkeypatch.setattr(executor_module, "load_aiops_tools_strict", fake_load_tools)
+    monkeypatch.setattr(
+        executor_module.llm_factory,
+        "create_chat_model",
+        lambda **kwargs: model,
+    )
+    monkeypatch.setattr(executor_module.config, "aiops_require_tool_call", True)
+    monkeypatch.setattr(executor_module.config, "aiops_executor_summarize_with_llm", False)
+
+    result = await executor_module.executor(
+        {
+            "input": "诊断 CPU 和内存告警",
+            "plan": [
+                "使用 query_cpu_metrics 和 query_memory_metrics 查询 super-biz-agent 指标"
+            ],
+            "past_steps": [],
+            "tool_events": [],
+            "response": "",
+        }
+    )
+
+    assert model.bound_tool_names == [
+        ["query_cpu_metrics", "query_memory_metrics"],
+        ["query_cpu_metrics", "query_memory_metrics"],
+    ]
+    assert "query_cpu_metrics" in result["past_steps"][0][1]
+    assert "query_memory_metrics" in result["past_steps"][0][1]
+    assert "retrieve_knowledge" not in result["past_steps"][0][1]
+
+
+@pytest.mark.asyncio
+async def test_executor_rejects_wrong_tool_when_step_names_monitor_tool(monkeypatch):
+    class WrongToolModel:
+        def bind_tools(self, tools, **kwargs):
+            return self
+
+        async def ainvoke(self, messages):
+            return AIMessage(
+                content="",
+                tool_calls=[
+                    {
+                        "name": "retrieve_knowledge",
+                        "args": {"query": "cpu经验"},
+                        "id": "call_wrong",
+                    }
+                ],
+            )
+
+    async def fake_load_tools():
+        return [retrieve_knowledge], [query_cpu_metrics]
+
+    monkeypatch.setattr(executor_module, "load_aiops_tools_strict", fake_load_tools)
+    monkeypatch.setattr(
+        executor_module.llm_factory,
+        "create_chat_model",
+        lambda **kwargs: WrongToolModel(),
+    )
+    monkeypatch.setattr(executor_module.config, "aiops_require_tool_call", True)
+
+    with pytest.raises(AIOpsCapabilityError, match="未指定的工具: retrieve_knowledge"):
+        await executor_module.executor(
+            {
+                "input": "诊断 CPU 告警",
+                "plan": ["必须使用 query_cpu_metrics 查询 CPU 指标"],
+                "past_steps": [],
+                "tool_events": [],
+                "response": "",
+            }
+        )
+
+
+@pytest.mark.asyncio
+async def test_executor_continues_until_all_explicit_tools_are_called(monkeypatch):
+    class PartialThenCompleteModel:
+        def __init__(self):
+            self.calls = 0
+
+        def bind_tools(self, tools, **kwargs):
+            return self
+
+        async def ainvoke(self, messages):
+            self.calls += 1
+            if self.calls == 1:
+                return AIMessage(
+                    content="",
+                    tool_calls=[
+                        {
+                            "name": "query_cpu_metrics",
+                            "args": {"service_name": "super-biz-agent"},
+                            "id": "call_cpu",
+                        }
+                    ],
+                )
+            return AIMessage(
+                content="",
+                tool_calls=[
+                    {
+                        "name": "query_memory_metrics",
+                        "args": {"service_name": "super-biz-agent"},
+                        "id": "call_mem",
+                    }
+                ],
+            )
+
+    model = PartialThenCompleteModel()
+
+    async def fake_load_tools():
+        return [], [query_cpu_metrics, query_memory_metrics]
+
+    monkeypatch.setattr(executor_module, "load_aiops_tools_strict", fake_load_tools)
+    monkeypatch.setattr(
+        executor_module.llm_factory,
+        "create_chat_model",
+        lambda **kwargs: model,
+    )
+    monkeypatch.setattr(executor_module.config, "aiops_require_tool_call", True)
+    monkeypatch.setattr(executor_module.config, "aiops_executor_summarize_with_llm", False)
+    monkeypatch.setattr(executor_module.config, "aiops_tool_call_max_rounds", 3)
+
+    result = await executor_module.executor(
+        {
+            "input": "诊断 CPU 和内存告警",
+            "plan": ["使用 query_cpu_metrics 和 query_memory_metrics 查询指标"],
+            "past_steps": [],
+            "tool_events": [],
+            "response": "",
+        }
+    )
+
+    assert model.calls == 2
+    assert "cpu ok for super-biz-agent" in result["past_steps"][0][1]
+    assert "memory ok for super-biz-agent" in result["past_steps"][0][1]
+
+
+def test_extract_explicit_tool_names_ignores_negated_knowledge_tool():
+    names = executor_module._extract_explicit_tool_names(
+        "使用 query_cpu_metrics 查询 CPU，禁止用 retrieve_knowledge 替代真实证据",
+        ["query_cpu_metrics", "retrieve_knowledge"],
+    )
+
+    assert names == ["query_cpu_metrics"]
+
+
+@pytest.mark.asyncio
 async def test_replanner_response_truncates_long_step_results(monkeypatch):
     class DummyPrompt:
         def __or__(self, other):
@@ -382,7 +577,13 @@ async def test_replanner_response_truncates_long_step_results(monkeypatch):
             return self.chain
 
     model = CaptureModel()
-    long_result = "A" * (replanner_module._RESPONSE_STEP_RESULT_MAX_CHARS + 500)
+    metric_json = (
+        '{"service_name":"super-biz-agent","metric_name":"cpu_usage_percent",'
+        '"source":"local_wsl:/proc","history_available":false,'
+        '"data_points":[{"timestamp":"11:00:00","value":12.3}],'
+        '"alert_info":{"triggered":false}}'
+    )
+    long_result = metric_json + "\n" + "A" * (replanner_module._RESPONSE_STEP_RESULT_MAX_CHARS + 500)
 
     monkeypatch.setattr(replanner_module, "response_prompt", DummyPrompt())
     monkeypatch.setattr(replanner_module.config, "aiops_structured_output_method", "function_calling")
@@ -400,7 +601,9 @@ async def test_replanner_response_truncates_long_step_results(monkeypatch):
     )
 
     history_message = model.chain.payload["messages"][1][1]
-    assert result == {"response": "ok"}
+    assert result["response"].startswith("ok")
+    assert result["evidence_package"]["actionable_evidence_count"] == 1
+    assert "E001-metric" in result["response"]
     assert "结果过长已截断" in history_message
     assert f"原始长度 {len(long_result)} 字符" in history_message
     assert len(history_message) < len(long_result)

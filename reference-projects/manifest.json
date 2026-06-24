@@ -1,0 +1,54 @@
+{
+  "purpose": "隔离保存 AIOps / SRE Agent / RAG / LLMOps 参考项目，只读学习，不直接纳入主仓库。",
+  "projects": [
+    {
+      "name": "holmesgpt",
+      "repo": "https://github.com/robusta-dev/holmesgpt.git",
+      "priority": 1,
+      "learn": ["observability toolset", "evidence-grounded RCA", "tool output budgeting", "read-only production guardrails"],
+      "target_modules": ["app/agent/aiops", "mcp_servers"]
+    },
+    {
+      "name": "k8sgpt",
+      "repo": "https://github.com/k8sgpt-ai/k8sgpt.git",
+      "priority": 2,
+      "learn": ["analyzer-first diagnostics", "structured findings", "explain after deterministic scan"],
+      "target_modules": ["app/agent/aiops", "app/models/aiops.py"]
+    },
+    {
+      "name": "keep",
+      "repo": "https://github.com/keephq/keep.git",
+      "priority": 3,
+      "learn": ["alert aggregation", "dedup", "correlation", "workflow/enrichment"],
+      "target_modules": ["app/api", "app/services", "frontend/src"]
+    },
+    {
+      "name": "ragflow",
+      "repo": "https://github.com/infiniflow/ragflow.git",
+      "priority": 4,
+      "learn": ["document parsing", "chunking UX", "citations", "retrieval pipeline"],
+      "target_modules": ["app/services", "app/api/rag.py"]
+    },
+    {
+      "name": "langfuse",
+      "repo": "https://github.com/langfuse/langfuse.git",
+      "priority": 5,
+      "learn": ["LLM tracing", "prompt version", "datasets", "evals", "latency/cost observability"],
+      "target_modules": ["app/services/chat_trace_service.py", "app/core/llm_factory.py"]
+    },
+    {
+      "name": "promptfoo",
+      "repo": "https://github.com/promptfoo/promptfoo.git",
+      "priority": 6,
+      "learn": ["prompt/agent/RAG regression eval", "red-team cases", "CI eval gates"],
+      "target_modules": ["evals", "scripts"]
+    },
+    {
+      "name": "ragas",
+      "repo": "https://github.com/explodinggradients/ragas.git",
+      "priority": 7,
+      "learn": ["RAG metrics", "faithfulness", "context precision/recall"],
+      "target_modules": ["evals", "scripts"]
+    }
+  ]
+}

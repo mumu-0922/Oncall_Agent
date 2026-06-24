@@ -5,6 +5,8 @@ Executor 节点：执行单个步骤
 
 import asyncio
 import json
+import re
+from collections.abc import Iterable
 from typing import Any
 
 from langchain_core.messages import HumanMessage, SystemMessage, ToolMessage
@@ -22,6 +24,21 @@ from .utils import (
     format_exception,
     load_aiops_tools_strict,
     message_to_text,
+)
+
+
+_KNOWN_AIOPS_TOOL_NAMES = {
+    "get_current_time",
+    "retrieve_knowledge",
+    "get_current_timestamp",
+    "get_region_code_by_name",
+    "search_topic_by_service_name",
+    "search_log",
+    "query_cpu_metrics",
+    "query_memory_metrics",
+}
+_NEGATED_TOOL_PREFIX_RE = re.compile(
+    r"(禁止|不要|不得|不能|不可|不应|无需|无须|不需要|别|避免|拒绝)(?:[\s\S]{0,8})$"
 )
 
 
@@ -44,20 +61,40 @@ async def executor(state: PlanExecuteState) -> dict[str, Any]:
 
     local_tools, mcp_tools = await load_aiops_tools_strict()
     all_tools = local_tools + mcp_tools
+    tools_by_name = {getattr(tool, "name", ""): tool for tool in all_tools}
 
-    first_round_tool_choice = "required" if config.aiops_require_tool_call else "auto"
+    explicit_tool_names = _extract_explicit_tool_names(task, tools_by_name.keys())
+    missing_explicit_tools = [name for name in explicit_tool_names if name not in tools_by_name]
+    if missing_explicit_tools:
+        raise AIOpsExecutionError(
+            "当前步骤显式指定了未加载的工具: "
+            f"{', '.join(missing_explicit_tools)}；拒绝改用其他工具生成伪证据。"
+        )
+
+    required_tool_names = [name for name in explicit_tool_names if name in tools_by_name]
+    required_tool_set = set(required_tool_names)
+    execution_tools = (
+        [tools_by_name[name] for name in required_tool_names] if required_tool_names else all_tools
+    )
+    called_required_tool_names: set[str] = set()
+
+    if required_tool_names:
+        logger.info(
+            "当前步骤检测到显式工具约束: {}；Executor 将只绑定这些工具",
+            ", ".join(required_tool_names),
+        )
+
+    first_round_tool_choice = (
+        "required" if config.aiops_require_tool_call or required_tool_names else "auto"
+    )
     try:
         llm = llm_factory.create_chat_model(
             model=config.effective_llm_model,
             temperature=0,
             streaming=False,
         )
-        llm_with_required_tools = llm.bind_tools(all_tools, tool_choice=first_round_tool_choice)
-        llm_with_optional_tools = (
-            llm.bind_tools(all_tools, tool_choice="auto")
-            if first_round_tool_choice != "auto"
-            else llm_with_required_tools
-        )
+        llm_with_required_tools = llm.bind_tools(execution_tools, tool_choice="required")
+        llm_with_optional_tools = llm.bind_tools(execution_tools, tool_choice="auto")
     except Exception as exc:
         detail = format_exception(exc)
         logger.error("工具绑定失败: {}", detail, exc_info=True)
@@ -66,7 +103,6 @@ async def executor(state: PlanExecuteState) -> dict[str, Any]:
             f"原始错误: {detail}"
         ) from exc
 
-    tools_by_name = {getattr(tool, "name", ""): tool for tool in all_tools}
     trace_observer = ChatTraceObserver()
     tool_events: list[dict[str, Any]] = [
         trace_observer.event(
@@ -81,9 +117,17 @@ async def executor(state: PlanExecuteState) -> dict[str, Any]:
         )
     ]
 
+    explicit_tool_rule = ""
+    if required_tool_names:
+        explicit_tool_rule = (
+            "\n7. 当前步骤显式指定了这些工具，必须全部调用且只能调用它们："
+            f"{', '.join(required_tool_names)}。"
+            "\n8. 禁止用 retrieve_knowledge、常识或知识库内容替代上述监控/日志工具证据。"
+        )
+
     messages = [
         SystemMessage(
-            content="""你是一个严格的 AIOps Executor，负责执行单个计划步骤。
+            content=f"""你是一个严格的 AIOps Executor，负责执行单个计划步骤。
 
 硬性规则：
 1. 当前步骤至少调用一次工具获取真实证据，禁止只用常识直接回答。
@@ -91,7 +135,7 @@ async def executor(state: PlanExecuteState) -> dict[str, Any]:
 3. 对日志/监控/主题查询必须使用 MCP 工具。
 4. 已经拿到足够工具结果后，必须基于工具返回内容总结当前步骤。
 5. 如果工具失败，必须把失败原因作为执行结果的一部分返回。
-6. 专注于当前步骤，不要生成最终报告。"""
+6. 专注于当前步骤，不要生成最终报告。{explicit_tool_rule}"""
         ),
         HumanMessage(content=f"请执行以下 AIOps 步骤，并调用必要工具获取证据：{task}"),
     ]
@@ -101,9 +145,16 @@ async def executor(state: PlanExecuteState) -> dict[str, Any]:
 
     try:
         for round_index in range(max_rounds):
-            round_tool_choice = first_round_tool_choice if tool_call_count == 0 else "auto"
+            missing_required_before_round = _missing_required_tool_names(
+                required_tool_names,
+                called_required_tool_names,
+            )
+            force_tool_call = bool(missing_required_before_round) or (
+                tool_call_count == 0 and first_round_tool_choice == "required"
+            )
+            round_tool_choice = "required" if force_tool_call else "auto"
             round_llm = (
-                llm_with_required_tools if tool_call_count == 0 else llm_with_optional_tools
+                llm_with_required_tools if force_tool_call else llm_with_optional_tools
             )
             logger.info(
                 "Executor 第 {} 轮请求 LLM，tool_choice={}",
@@ -134,6 +185,15 @@ async def executor(state: PlanExecuteState) -> dict[str, Any]:
             tool_events.extend(trace_observer.events_from_message(llm_response, node_name="executor"))
 
             if not tool_calls:
+                missing_required = _missing_required_tool_names(
+                    required_tool_names,
+                    called_required_tool_names,
+                )
+                if missing_required:
+                    raise AIOpsCapabilityError(
+                        "模型未调用当前步骤显式指定工具: "
+                        f"{', '.join(missing_required)}；拒绝继续生成伪诊断结果。"
+                    )
                 if tool_call_count == 0 and config.aiops_require_tool_call:
                     raise AIOpsCapabilityError(
                         "模型没有产生任何 tool_calls。AIOps 执行器要求模型支持并实际调用工具，"
@@ -159,6 +219,13 @@ async def executor(state: PlanExecuteState) -> dict[str, Any]:
                 }
 
             logger.info("检测到 {} 个工具调用", len(tool_calls))
+            invalid_tool_names = _invalid_tool_names(tool_calls, required_tool_set)
+            if invalid_tool_names:
+                raise AIOpsCapabilityError(
+                    "模型调用了当前步骤未指定的工具: "
+                    f"{', '.join(invalid_tool_names)}；当前步骤只允许: "
+                    f"{', '.join(required_tool_names)}。"
+                )
             tool_call_count += len(tool_calls)
             messages.append(llm_response)
             for tool_call in tool_calls:
@@ -189,6 +256,34 @@ async def executor(state: PlanExecuteState) -> dict[str, Any]:
                 )
                 messages.append(tool_message)
                 tool_events.extend(trace_observer.events_from_message(tool_message, node_name="executor"))
+                if tool_name in required_tool_set:
+                    called_required_tool_names.add(tool_name)
+
+            missing_required = _missing_required_tool_names(
+                required_tool_names,
+                called_required_tool_names,
+            )
+            if missing_required:
+                if round_index == max_rounds - 1:
+                    raise AIOpsExecutionError(
+                        "当前步骤显式指定工具未全部调用，已调用: "
+                        f"{', '.join(sorted(called_required_tool_names)) or '无'}；缺失: "
+                        f"{', '.join(missing_required)}。拒绝基于不完整证据生成结论。"
+                    )
+                logger.warning(
+                    "当前步骤仍缺少显式指定工具: {}，继续下一轮工具调用",
+                    ", ".join(missing_required),
+                )
+                messages.append(
+                    HumanMessage(
+                        content=(
+                            "当前步骤还缺少这些显式指定工具证据："
+                            f"{', '.join(missing_required)}。"
+                            "请继续调用缺失工具，不要总结，不要改用 retrieve_knowledge。"
+                        )
+                    )
+                )
+                continue
 
             if tool_call_count > 0 and not config.aiops_executor_summarize_with_llm:
                 result = _build_tool_evidence_summary(task, messages, trace_observer=trace_observer)
@@ -253,6 +348,56 @@ async def executor(state: PlanExecuteState) -> dict[str, Any]:
         raise AIOpsExecutionError(f"执行步骤失败，当前步骤未完成: {detail}") from exc
 
     raise AIOpsExecutionError("Executor 未产生执行结果")
+
+
+def _extract_explicit_tool_names(task: str, available_tool_names: Iterable[str]) -> list[str]:
+    """按步骤文本中显式出现的工具名提取必须调用的工具，保持出现顺序。"""
+    task_text = task or ""
+    candidate_names = set(_KNOWN_AIOPS_TOOL_NAMES)
+    candidate_names.update(name for name in available_tool_names if name)
+
+    matches: list[tuple[int, str]] = []
+    for name in candidate_names:
+        pattern = rf"(?<![A-Za-z0-9_]){re.escape(name)}(?![A-Za-z0-9_])"
+        match = re.search(pattern, task_text)
+        if match and not _is_negated_tool_reference(task_text, match.start()):
+            matches.append((match.start(), name))
+
+    ordered_names: list[str] = []
+    seen: set[str] = set()
+    for _, name in sorted(matches, key=lambda item: item[0]):
+        if name not in seen:
+            seen.add(name)
+            ordered_names.append(name)
+    return ordered_names
+
+
+def _is_negated_tool_reference(task_text: str, start_index: int) -> bool:
+    """识别“禁止/不要/不得使用 tool”这类负向提及，避免误判为必调工具。"""
+    prefix = task_text[max(0, start_index - 18) : start_index]
+    return bool(_NEGATED_TOOL_PREFIX_RE.search(prefix))
+
+
+def _missing_required_tool_names(
+    required_tool_names: list[str],
+    called_required_tool_names: set[str],
+) -> list[str]:
+    """返回尚未调用的显式指定工具，保持原始顺序。"""
+    return [name for name in required_tool_names if name not in called_required_tool_names]
+
+
+def _invalid_tool_names(tool_calls: list[dict[str, Any]], required_tool_set: set[str]) -> list[str]:
+    """当步骤显式指定工具时，拒绝模型调用指定集合之外的工具。"""
+    if not required_tool_set:
+        return []
+    invalid_names = []
+    seen: set[str] = set()
+    for tool_call in tool_calls:
+        name = str(tool_call.get("name") or "")
+        if name not in required_tool_set and name not in seen:
+            seen.add(name)
+            invalid_names.append(name or "<missing>")
+    return invalid_names
 
 
 def _build_tool_evidence_summary(

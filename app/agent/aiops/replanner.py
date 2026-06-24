@@ -14,6 +14,8 @@ from pydantic import BaseModel, Field
 
 from app.config import config
 from app.core.llm_factory import llm_factory
+from app.models.evidence import EvidencePackage
+from app.services.evidence_package_service import evidence_package_service
 
 from .state import PlanExecuteState
 from .utils import (
@@ -92,7 +94,8 @@ response_prompt = ChatPromptTemplate.from_messages(
 
                 响应要求：
                 - 使用 Markdown 格式。
-                - 必须基于执行历史里的真实工具结果，不要编造。
+                - 必须优先基于 Evidence Package 里的真实工具结果，不要编造。
+                - 每个根因/风险/建议都要能对应 Evidence Package 中的证据 ID；不能对应时必须写“证据不足”。
                 - 如果工具结果包含 error/source unavailable/未配置/禁用 mock，必须把该错误作为结论的一部分原样说明。
                 - 禁止把知识库经验、示例服务名、示例 PID 当作本次真实环境事实。
                 - 若证据不足，要明确写“证据不足”和下一步需要查询的工具/数据。
@@ -229,6 +232,26 @@ async def _generate_response(state: PlanExecuteState, llm: BaseChatModel) -> dic
     if not past_steps:
         raise AIOpsExecutionError("没有任何已执行步骤证据，拒绝生成最终诊断报告")
 
+    evidence_package = evidence_package_service.build_from_state(state)
+    evidence_package_dict = evidence_package.to_prompt_dict()
+    logger.info(
+        "Evidence Package 构建完成 incident_id={} evidence_count={} actionable={} confidence={}",
+        evidence_package.incident_id,
+        evidence_package.evidence_count,
+        evidence_package.actionable_evidence_count,
+        evidence_package.confidence,
+    )
+    if not evidence_package.has_actionable_evidence:
+        logger.warning(
+            "Evidence Package 无监控/日志/告警事实证据，跳过 LLM 最终报告生成，直接返回证据不足"
+        )
+        return {
+            "response": evidence_package_service.render_insufficient_evidence_report(
+                evidence_package
+            ),
+            "evidence_package": evidence_package_dict,
+        }
+
     # 截断每个步骤结果，防止 execution_history 过大导致 LLM 超时。
     truncated_parts: list[str] = []
     for step, result in past_steps:
@@ -241,6 +264,8 @@ async def _generate_response(state: PlanExecuteState, llm: BaseChatModel) -> dic
         truncated_parts.append(f"### 步骤: {step}\n**结果:**\n{result_str}")
     execution_history = "\n\n".join(truncated_parts)
     logger.info("execution_history 总长度: {} 字符，共 {} 个步骤", len(execution_history), len(past_steps))
+    evidence_markdown = evidence_package.to_prompt_markdown()
+    logger.info("evidence_package prompt 长度: {} 字符", len(evidence_markdown))
 
     method = _structured_method()
     logger.info("Response 使用 structured_output method={}", method)
@@ -249,7 +274,12 @@ async def _generate_response(state: PlanExecuteState, llm: BaseChatModel) -> dic
         "messages": [
             ("user", f"原始任务: {input_text}"),
             ("user", f"执行历史:\n{execution_history}"),
-            ("user", "请基于以上工具证据生成最终 Markdown 响应，并填入 response 字段。"),
+            ("user", f"结构化 Evidence Package:\n{evidence_markdown}"),
+            (
+                "user",
+                "请只基于 Evidence Package 和执行历史生成最终 Markdown 响应，并填入 response 字段。"
+                "若某结论没有证据 ID 支撑，必须明确写“证据不足”。",
+            ),
         ]
     }
     response_obj = await _ainvoke_structured_with_fallback(
@@ -268,10 +298,26 @@ async def _generate_response(state: PlanExecuteState, llm: BaseChatModel) -> dic
     else:
         raise AIOpsCapabilityError(f"Response structured output 返回未知类型: {type(response_obj)}")
 
-    final_response = assert_non_empty_text(final_response, label="最终响应")
+    final_response = _ensure_evidence_references(
+        assert_non_empty_text(final_response, label="最终响应"),
+        evidence_package,
+    )
     logger.info(f"最终响应生成完成，长度: {len(final_response)}")
 
-    return {"response": final_response}
+    return {"response": final_response, "evidence_package": evidence_package_dict}
+
+
+def _ensure_evidence_references(response: str, evidence_package: EvidencePackage) -> str:
+    """确保最终报告至少带上证据索引，避免报告和证据包脱节。"""
+    item_ids = [item.id for item in evidence_package.all_items()]
+    if not item_ids or any(item_id in response for item_id in item_ids):
+        return response
+    index_lines = ["", "---", "", "## 证据索引"]
+    for item in evidence_package.all_items():
+        index_lines.append(
+            f"- `{item.id}` `{item.kind}` `{item.tool_name}`: {item.summary or item.title}"
+        )
+    return response.rstrip() + "\n" + "\n".join(index_lines)
 
 
 async def _ainvoke_structured_with_fallback(

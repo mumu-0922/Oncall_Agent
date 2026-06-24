@@ -24,5 +24,9 @@ class PlanExecuteState(TypedDict):
     # 使用 operator.add 追加每个节点本次产出的事件；不包含模型隐藏思维链。
     tool_events: Annotated[list[dict], operator.add]
 
+    # 最终报告生成前沉淀的结构化证据包。
+    # 报告必须基于该证据包；没有可用证据时必须明确“证据不足”。
+    evidence_package: dict
+
     # 最终响应/报告
     response: str

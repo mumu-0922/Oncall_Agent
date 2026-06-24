@@ -412,20 +412,56 @@ stop-cls:
 # 停止 FastAPI 服务
 stop-api:
 	@echo "$(YELLOW)🛑 停止 FastAPI 服务...$(NC)"
-	@if [ -f server.pid ]; then \
+	@stopped=0; \
+	targets=""; \
+	if [ -f server.pid ]; then \
 		pid=$$(cat server.pid); \
 		if ps -p $$pid > /dev/null 2>&1; then \
-			kill $$pid; \
-			echo "$(GREEN)✅ FastAPI 服务已停止 (PID: $$pid)$(NC)"; \
+			case " $$targets " in *" $$pid "*) ;; *) targets="$$targets $$pid";; esac; \
 		else \
 			echo "$(YELLOW)⚠️  进程不存在 (PID: $$pid)$(NC)"; \
 		fi; \
 		rm -f server.pid; \
 	else \
 		echo "$(YELLOW)⚠️  未找到 server.pid 文件$(NC)"; \
-		pkill -f "[u]vicorn app.main:app" 2>/dev/null && \
-			echo "$(GREEN)✅ 已停止所有 uvicorn 进程$(NC)" || \
-			echo "$(YELLOW)⚠️  没有运行中的 uvicorn 进程$(NC)"; \
+	fi; \
+	for pid in $$(pgrep -f "[u]vicorn app.main:app" 2>/dev/null || true); do \
+		[ -r /proc/$$pid/cmdline ] || continue; \
+		comm=$$(cat /proc/$$pid/comm 2>/dev/null || true); \
+		cmd=$$(tr '\0' ' ' < /proc/$$pid/cmdline 2>/dev/null || true); \
+		case "$$comm" in \
+			python*|python3*) \
+				if echo "$$cmd" | grep -q -- "-m uvicorn app.main:app"; then \
+					case " $$targets " in *" $$pid "*) ;; *) targets="$$targets $$pid";; esac; \
+				fi; \
+				;; \
+		esac; \
+	done; \
+	for pid in $$targets; do \
+		if ps -p $$pid > /dev/null 2>&1; then \
+			kill $$pid 2>/dev/null || true; \
+			stopped=1; \
+			echo "$(GREEN)✅ 已发送停止信号给 FastAPI 进程 (PID: $$pid)$(NC)"; \
+		fi; \
+	done; \
+	if [ "$$stopped" = "1" ]; then \
+		for _ in $$(seq 1 25); do \
+			alive=0; \
+			for pid in $$targets; do \
+				if ps -p $$pid > /dev/null 2>&1; then alive=1; fi; \
+			done; \
+			[ "$$alive" = "0" ] && break; \
+			sleep 0.2; \
+		done; \
+		for pid in $$targets; do \
+			if ps -p $$pid > /dev/null 2>&1; then \
+				kill -9 $$pid 2>/dev/null || true; \
+				echo "$(YELLOW)⚠️  FastAPI 进程未及时退出，已强制清理 (PID: $$pid)$(NC)"; \
+			fi; \
+		done; \
+	fi; \
+	if [ "$$stopped" = "0" ]; then \
+		echo "$(YELLOW)⚠️  没有残留 FastAPI python 进程$(NC)"; \
 	fi
 
 # 重启所有服务

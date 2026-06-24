@@ -104,6 +104,7 @@ class AIOpsService:
                 "plan": [],
                 "past_steps": [],
                 "tool_events": [],
+                "evidence_package": {},
                 "response": ""
             }
 
@@ -155,6 +156,9 @@ class AIOpsService:
             # 安全地获取响应（处理 values 可能为 None 的情况）
             if final_state and final_state.values:
                 final_response = final_state.values.get("response", "")
+                final_evidence_package = final_state.values.get("evidence_package", {})
+            else:
+                final_evidence_package = {}
 
             # 发送完成事件
             yield self._format_trace_event(
@@ -169,7 +173,8 @@ class AIOpsService:
                 "type": "complete",
                 "stage": "complete",
                 "message": "任务执行完成",
-                "response": final_response
+                "response": final_response,
+                "evidence_package": final_evidence_package,
             }
 
             logger.info(f"[会话 {session_id}] 任务执行完成")
@@ -291,7 +296,8 @@ class AIOpsService:
                     "message": "诊断流程完成",
                     "diagnosis": {
                         "status": "completed",
-                        "report": event.get("response", "")
+                        "report": event.get("response", ""),
+                        "evidence_package": event.get("evidence_package", {}),
                     }
                 }
             else:
@@ -372,6 +378,7 @@ class AIOpsService:
                 status="completed",
                 node="replanner",
                 summary=observer.truncate_text(str(response), 900),
+                evidence_package=state.get("evidence_package"),
             )
 
         return observer.event(
@@ -428,7 +435,8 @@ class AIOpsService:
                 "type": "report",
                 "stage": "final_report",
                 "message": "最终报告已生成",
-                "report": response
+                "report": response,
+                "evidence_package": state.get("evidence_package", {}),
             }
         else:
             # 重新规划
