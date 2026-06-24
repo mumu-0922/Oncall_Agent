@@ -11,6 +11,7 @@
 - [x] RAG 离线评测：`hit_rate`、`recall@k`、`precision@k`、`MRR`、`latency_ms`。
 - [x] AIOps strict runtime：MCP 不通、工具为空、模型不 tool_call 时显式失败，不生成假报告。
 - [x] Evidence Package：工具证据归档，证据不足时返回证据不足。
+- [x] AIOps Agent 离线评测：工具命中、证据覆盖、幻觉拦截、证据不足、timeout、耗时。
 - [x] Prometheus / Alertmanager MCP 工具：instant/range/query alerts，失败返回真实原因。
 - [x] `search_local_logs`：只读日志白名单，不扫描全盘，不读取无关敏感路径。
 - [x] 日志摘要增强：确定性噪声过滤、错误分类、错误指纹聚合、最近问题摘要。
@@ -19,7 +20,6 @@
 
 当前限制：
 
-- [ ] AIOps Agent 还没有独立离线评测集和指标报表。
 - [ ] VPS 生产部署模板未完成。
 - [ ] nginx / docker / systemd 日志接入未完成。
 - [ ] Runbook 半自动自愈未完成。
@@ -104,29 +104,56 @@ curl -sS http://127.0.0.1:9900/api/aiops/self-check
 
 ### 交付物
 
-- [ ] 新增 `evals/aiops_cases.json`
-- [ ] 新增 `scripts/eval_aiops_agent.py`
-- [ ] 新增 `evals/reports/aiops_agent_eval.json`
-- [ ] 新增 `tests/test_aiops_eval_metrics.py`
-- [ ] Makefile 新增 `make eval-aiops`
+- [x] 新增 `evals/aiops_cases.json`
+- [x] 新增 `scripts/eval_aiops_agent.py`
+- [x] 新增 `evals/reports/aiops_agent_eval.json`
+- [x] 新增 `tests/test_aiops_eval_metrics.py`
+- [x] Makefile 新增 `make eval-aiops`
 
 ### 指标 checklist
 
-- [ ] `tool_call_success_rate`
-- [ ] `expected_tool_hit_rate`
-- [ ] `evidence_coverage`
-- [ ] `hallucination_block_rate`
-- [ ] `insufficient_evidence_rate`
-- [ ] `avg_latency_ms`
-- [ ] `timeout_rate`
+- [x] `tool_call_success_rate`
+- [x] `expected_tool_hit_rate`
+- [x] `evidence_coverage`
+- [x] `hallucination_block_rate`
+- [x] `insufficient_evidence_rate`
+- [x] `avg_latency_ms`
+- [x] `timeout_rate`
 
 ### Case checklist
 
-- [ ] 正常日志查询：必须调用 `search_local_logs`
-- [ ] Prometheus 指标查询：必须调用 `query_cpu_metrics` / `query_memory_metrics`
-- [ ] MCP 不可用：必须返回真实错误
-- [ ] 日志源未配置：必须返回证据不足
-- [ ] 禁止无证据输出“内存泄漏/CPU 死循环”等根因
+- [x] 正常日志查询：必须调用 `search_local_logs`
+- [x] Prometheus 指标查询：必须调用 `query_cpu_metrics` / `query_memory_metrics`
+- [x] MCP 不可用：必须返回真实错误
+- [x] 日志源未配置：必须返回证据不足
+- [x] 禁止无证据输出“内存泄漏/CPU 死循环”等根因
+
+### 设计说明
+
+- 默认评测模式为 `offline_trace`，不调用 LLM、不访问真实 VPS、Prometheus 或 MCP，避免把网络/中转波动混进评测指标。
+- 评测输入是可回放的 AIOps trace case：`tool_call`、`tool_result`、`final_response`、期望工具、期望证据类型、禁止声明。
+- 评测先通过 `EvidencePackageService` 把工具结果转成 Evidence Package，再量化工具命中、证据引用、证据不足拦截、timeout 与错误路径。
+- 工具错误也算证据类型 `tool_error`，报告必须引用 `E001-tool_error` 这类证据 ID，不能只口头说失败。
+- `tool_call_success_rate` 会把故意设计的失败路径计入分母；因此当前 0.5 是真实反映：6 个 case 中 3 个是 MCP 不可用、日志源缺失、Prometheus timeout。
+
+### 当前离线评测结果
+
+来源：`evals/reports/aiops_agent_eval.json`
+
+```json
+{
+  "tool_call_success_rate": 0.5,
+  "expected_tool_hit_rate": 1.0,
+  "expected_evidence_kind_hit_rate": 1.0,
+  "evidence_coverage": 1.0,
+  "hallucination_block_rate": 1.0,
+  "insufficient_evidence_rate": 0.3333,
+  "timeout_rate": 0.1667,
+  "outcome_match_rate": 1.0,
+  "expected_error_message_rate": 1.0,
+  "avg_latency_ms": 0.1717
+}
+```
 
 ### 验收命令
 
@@ -137,9 +164,9 @@ make eval-aiops
 
 ### 完成判定
 
-- [ ] 生成稳定 JSON 报表
-- [ ] 报表包含所有指标
-- [ ] README 能引用一组真实指标
+- [x] 生成稳定 JSON 报表
+- [x] 报表包含所有指标
+- [x] README 能引用一组真实指标
 
 ---
 
@@ -294,3 +321,34 @@ curl -sS http://127.0.0.1:9900/api/aiops/self-check
 - 剩余风险：
   - 当前为规则分析，不是 ML/模型分类；复杂业务错误需要继续扩展分类规则。
   - 当前只分析 `search_local_logs` 返回的日志样本，受 `limit` 与日志白名单配置影响。
+
+### 2026-06-24 - P2 AIOps Agent 量化评测
+
+- 改动：
+  - 新增 `evals/aiops_cases.json`，覆盖日志查询、CPU/内存指标、MCP 不可用、日志源缺失、无证据禁幻觉、Prometheus timeout。
+  - 新增 `scripts/eval_aiops_agent.py`，以离线 trace benchmark 评估工具命中、证据覆盖、幻觉拦截、证据不足、timeout 与耗时。
+  - 新增 `tests/test_aiops_eval_metrics.py`，覆盖核心指标、失败路径、timeout 统计和 analyzer lazy import。
+  - Makefile 新增 `make eval-aiops`，输出 `evals/reports/aiops_agent_eval.json`。
+  - `app.agent.aiops` 改为 lazy public exports，避免离线评测导入 analyzer 时触发 Planner/Replanner/RAG 初始化副作用。
+- 验证：
+  - `make eval-aiops`
+    - 结果：生成 `evals/reports/aiops_agent_eval.json`
+  - `.venv/bin/python -m pytest tests/test_aiops_eval_metrics.py -q`
+    - 结果：`7 passed`
+  - `.venv/bin/python -m pytest tests/test_aiops_eval_metrics.py tests/test_aiops_evidence_package.py tests/test_aiops_analyzers.py tests/test_aiops_strict_runtime.py tests/test_aiops_self_check.py tests/test_log_analysis_service.py tests/test_local_vps_mcp.py tests/test_prometheus_mcp.py -q`
+    - 结果：`64 passed`
+  - `.venv/bin/python -m ruff check app/agent/aiops/__init__.py app/services/aiops_service.py scripts/eval_aiops_agent.py tests/test_aiops_eval_metrics.py`
+    - 结果：`All checks passed!`
+- 当前指标：
+  - `tool_call_success_rate=0.5`
+  - `expected_tool_hit_rate=1.0`
+  - `evidence_coverage=1.0`
+  - `hallucination_block_rate=1.0`
+  - `insufficient_evidence_rate=0.3333`
+  - `timeout_rate=0.1667`
+  - `outcome_match_rate=1.0`
+  - `avg_latency_ms≈0.17`
+- 剩余风险：
+  - 当前是离线 trace benchmark，不代表真实 LLM 每次都会选择同样工具；后续可扩展 live-agent eval。
+  - 当前 case 数为 6，覆盖关键链路但还不算大规模评测集。
+  - `tool_call_success_rate=0.5` 包含故意设计的错误/超时 case，不能解读为系统正常场景只有 50% 成功率。

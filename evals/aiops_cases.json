@@ -1,0 +1,219 @@
+[
+  {
+    "id": "log_timeout_success",
+    "question": "super-biz-agent 最近出现 timeout，应如何基于真实日志排查？",
+    "difficulty": "basic",
+    "tags": ["aiops", "logs", "timeout"],
+    "expected_tools": ["search_local_logs"],
+    "expected_evidence_kinds": ["log"],
+    "expected_outcome": "success",
+    "forbidden_claims": ["根因是内存泄漏", "根因为内存泄漏", "CPU 死循环导致", "死循环导致"],
+    "final_response": "# AIOps 诊断报告\n\n## 结论\n基于 `E001-log`，日志窗口内出现 gateway timeout / upstream timeout 信号。当前证据只能支持继续排查上游网关、LLM/MCP 超时配置和网络链路；未发现可证明内存泄漏或 CPU 死循环的证据。\n\n## 下一步\n1. 扩大日志窗口继续查询 timeout。\n2. 同步查询 CPU/内存指标确认是否存在资源饱和。",
+    "tool_events": [
+      {
+        "kind": "tool_call",
+        "tool": "search_local_logs",
+        "status": "started",
+        "args": {
+          "service_name": "super-biz-agent",
+          "query": "level:ERROR OR timeout",
+          "window_minutes": 60,
+          "limit": 20
+        }
+      },
+      {
+        "kind": "tool_result",
+        "tool": "search_local_logs",
+        "status": "completed",
+        "summary": {
+          "tool": "search_local_logs",
+          "source": "local_wsl:file",
+          "matched_service": "super-biz-agent",
+          "query": "level:ERROR OR timeout",
+          "total": 2,
+          "logs": [
+            {
+              "timestamp": "2026-06-24 15:00:01",
+              "level": "ERROR",
+              "file": "/srv/oncall/server.log",
+              "message": "gateway timeout while calling upstream request_id=req-001"
+            },
+            {
+              "timestamp": "2026-06-24 15:00:12",
+              "level": "ERROR",
+              "file": "/srv/oncall/server.log",
+              "message": "upstream timeout after 60000ms request_id=req-002"
+            }
+          ],
+          "history_available": true
+        }
+      }
+    ]
+  },
+  {
+    "id": "cpu_memory_metrics_success",
+    "question": "super-biz-agent 出现 CPU 告警，同时需要确认内存是否异常。",
+    "difficulty": "basic",
+    "tags": ["aiops", "metrics", "cpu", "memory"],
+    "expected_tools": ["query_cpu_metrics", "query_memory_metrics"],
+    "expected_evidence_kinds": ["metric"],
+    "expected_outcome": "success",
+    "forbidden_claims": ["根因是慢 SQL", "根因为内存泄漏"],
+    "final_response": "# AIOps 诊断报告\n\n## 结论\n基于 `E001-metric` 和 `E002-metric`，CPU 指标 max≈92.4%，内存 max≈73.2%。当前证据支持“CPU 饱和告警成立，内存未达到严重阈值”，但不能直接断言慢 SQL 或内存泄漏。\n\n## 下一步\n1. 查询错误日志和慢任务日志。\n2. 查询更长时间范围的 CPU range 指标确认持续时间。",
+    "tool_events": [
+      {
+        "kind": "tool_call",
+        "tool": "query_cpu_metrics",
+        "status": "started",
+        "args": {
+          "service_name": "super-biz-agent",
+          "interval": "1m"
+        }
+      },
+      {
+        "kind": "tool_result",
+        "tool": "query_cpu_metrics",
+        "status": "completed",
+        "summary": {
+          "service_name": "super-biz-agent",
+          "metric_name": "cpu_usage_percent",
+          "source": "prometheus",
+          "history_available": true,
+          "data_points": [
+            {"timestamp": "2026-06-24 15:00:00", "value": 88.1},
+            {"timestamp": "2026-06-24 15:01:00", "value": 92.4}
+          ],
+          "statistics": {"avg": 90.25, "max": 92.4, "min": 88.1},
+          "alert_info": {"triggered": true, "threshold": 90, "message": "CPU 高于阈值"}
+        }
+      },
+      {
+        "kind": "tool_call",
+        "tool": "query_memory_metrics",
+        "status": "started",
+        "args": {
+          "service_name": "super-biz-agent",
+          "interval": "1m"
+        }
+      },
+      {
+        "kind": "tool_result",
+        "tool": "query_memory_metrics",
+        "status": "completed",
+        "summary": {
+          "service_name": "super-biz-agent",
+          "metric_name": "memory_usage_percent",
+          "source": "prometheus",
+          "history_available": true,
+          "data_points": [
+            {"timestamp": "2026-06-24 15:00:00", "value": 71.5},
+            {"timestamp": "2026-06-24 15:01:00", "value": 73.2}
+          ],
+          "statistics": {"avg": 72.35, "max": 73.2, "min": 71.5},
+          "alert_info": {"triggered": false, "threshold": 90, "message": "内存未触发阈值"}
+        }
+      }
+    ]
+  },
+  {
+    "id": "mcp_unavailable_real_error",
+    "question": "如果 Monitor MCP 不可用，Agent 应该如何返回错误？",
+    "difficulty": "medium",
+    "tags": ["aiops", "mcp", "error"],
+    "expected_tools": ["query_cpu_metrics"],
+    "expected_evidence_kinds": ["tool_error"],
+    "expected_outcome": "tool_error",
+    "expected_error_substrings": ["MCP", "Connection refused"],
+    "final_response": "# AIOps 诊断报告\n\n## 结论\n基于 `E001-tool_error`，query_cpu_metrics 调用失败：Monitor MCP endpoint 连接失败，原始错误包含 `Connection refused`。本次不能生成 CPU 根因结论。\n\n## 下一步\n1. 检查 Monitor MCP 进程和 8004 端口。\n2. 检查 MCP URL 配置后重试。",
+    "tool_events": [
+      {
+        "kind": "tool_call",
+        "tool": "query_cpu_metrics",
+        "status": "started",
+        "args": {"service_name": "super-biz-agent"}
+      },
+      {
+        "kind": "tool_result",
+        "tool": "query_cpu_metrics",
+        "status": "error",
+        "summary": "工具 query_cpu_metrics 调用失败: MCP endpoint http://127.0.0.1:8004/mcp Connection refused"
+      }
+    ]
+  },
+  {
+    "id": "log_source_missing_insufficient_evidence",
+    "question": "没有配置 AIOPS_SERVICE_LOG_MAP 时，Agent 能否拒绝生成假日志结论？",
+    "difficulty": "medium",
+    "tags": ["aiops", "logs", "insufficient-evidence"],
+    "expected_tools": ["search_local_logs"],
+    "expected_evidence_kinds": ["tool_error"],
+    "expected_outcome": "insufficient_evidence",
+    "expected_error_substrings": ["AIOPS_SERVICE_LOG_MAP", "不会自动扫描全盘"],
+    "forbidden_claims": ["根因是日志爆量", "日志证明"],
+    "final_response": "# AIOps 诊断报告\n\n## 结论\n基于 `E001-tool_error`，证据不足。`search_local_logs` 返回 `AIOPS_SERVICE_LOG_MAP 为空`，系统不会自动扫描全盘或读取未授权路径。本次拒绝生成日志根因结论。\n\n## 下一步\n配置服务名到日志路径的白名单映射后重试。",
+    "tool_events": [
+      {
+        "kind": "tool_call",
+        "tool": "search_local_logs",
+        "status": "started",
+        "args": {"service_name": "super-biz-agent", "query": "level:ERROR OR timeout"}
+      },
+      {
+        "kind": "tool_result",
+        "tool": "search_local_logs",
+        "status": "completed",
+        "summary": {
+          "tool": "search_local_logs",
+          "source": "local_wsl:file",
+          "service_name": "super-biz-agent",
+          "total": 0,
+          "logs": [],
+          "error": "AIOPS_SERVICE_LOG_MAP 为空；search_local_logs 不会自动扫描全盘或读取未授权路径。",
+          "message": "请在 .env 配置服务名到日志文件的白名单映射。"
+        }
+      }
+    ]
+  },
+  {
+    "id": "no_evidence_blocks_root_cause",
+    "question": "只有用户描述 CPU 高，没有任何工具证据时，能否阻止内存泄漏/死循环等根因幻觉？",
+    "difficulty": "hard",
+    "tags": ["aiops", "hallucination", "evidence"],
+    "expected_tools": [],
+    "expected_evidence_kinds": [],
+    "expected_outcome": "insufficient_evidence",
+    "forbidden_claims": ["根因是内存泄漏", "根因为内存泄漏", "CPU 死循环导致", "死循环导致"],
+    "final_response": "# AIOps 诊断报告\n\n## 结论\n证据不足。当前没有监控、日志或告警工具证据，拒绝生成未经证实的根因结论。\n\n## 下一步\n先调用 query_cpu_metrics / query_memory_metrics / search_local_logs 获取事实证据。",
+    "tool_events": []
+  },
+  {
+    "id": "metric_query_timeout_accounted",
+    "question": "Prometheus range 查询超时时，评测能否统计 timeout_rate？",
+    "difficulty": "medium",
+    "tags": ["aiops", "metrics", "timeout"],
+    "expected_tools": ["query_metric_range"],
+    "expected_evidence_kinds": ["tool_error"],
+    "expected_outcome": "timeout",
+    "expected_error_substrings": ["超时"],
+    "final_response": "# AIOps 诊断报告\n\n## 结论\n基于 `E001-tool_error`，query_metric_range 调用超时（>20s），本次未获得历史曲线，不能判断持续性趋势。\n\n## 下一步\n缩小时间窗口或检查 Prometheus API 延迟后重试。",
+    "tool_events": [
+      {
+        "kind": "tool_call",
+        "tool": "query_metric_range",
+        "status": "started",
+        "args": {
+          "query": "rate(process_cpu_seconds_total[5m])",
+          "start": "2026-06-24T14:00:00Z",
+          "end": "2026-06-24T15:00:00Z",
+          "step": "60s"
+        }
+      },
+      {
+        "kind": "tool_result",
+        "tool": "query_metric_range",
+        "status": "error",
+        "summary": "query_metric_range 调用超时（>20s），Prometheus API 未返回数据。"
+      }
+    ]
+  }
+]

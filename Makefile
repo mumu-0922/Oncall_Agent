@@ -28,7 +28,7 @@ NC = \033[0m
 .PHONY: help init one open start stop restart check upload clean up down status wait \
         install install-dev dev run test test-quick format lint fix type-check \
         web-install web-dev web-build web-preview api-dev dev-all \
-        security pre-commit-install pre-commit check-all coverage eval-retrieval eval-rag docs shell \
+        security pre-commit-install pre-commit check-all coverage eval-retrieval eval-rag eval-aiops docs shell \
         ipython watch add add-dev remove list-docs test-upload sync logs \
         start-cls stop-cls start-monitor stop-monitor start-api stop-api status-mcp \
         obs-up obs-down obs-restart obs-status obs-logs obs-check
@@ -94,6 +94,7 @@ help:
 	@echo "  $(YELLOW)make fix$(NC)          - 🔧 自动修复问题"
 	@echo "  $(YELLOW)make test$(NC)         - 🧪 运行测试"
 	@echo "  $(YELLOW)make eval-retrieval$(NC) - 📊 运行 RAG 检索 golden cases"
+	@echo "  $(YELLOW)make eval-aiops$(NC)   - 📊 运行 AIOps Agent 离线 golden cases"
 	@echo "  $(YELLOW)make check-all$(NC)    - ✅ 运行所有检查"
 	@echo ""
 	@echo "$(CYAN)【其他】$(NC)"
@@ -757,6 +758,11 @@ eval-rag:  ## 运行指定 RAG 模式评估 (用法: make eval-rag MODE=hybrid_p
 	@echo "$(YELLOW)📊 运行 RAG 模式评估: $(MODE)...$(NC)"
 	mkdir -p evals/reports
 	$(PYTHON) scripts/eval_retrieval.py --mode $(MODE) --k 3 --out evals/reports/retrieval_$(MODE).json
+
+eval-aiops:  ## 运行 AIOps Agent 离线 golden cases
+	@echo "$(YELLOW)📊 运行 AIOps Agent 评估...$(NC)"
+	mkdir -p evals/reports
+	$(PYTHON) scripts/eval_aiops_agent.py --cases evals/aiops_cases.json --out evals/reports/aiops_agent_eval.json
 
 # ============================================================
 # 其他工具

@@ -10,7 +10,10 @@ from langgraph.checkpoint.memory import MemorySaver
 from langgraph.graph import END, StateGraph
 from loguru import logger
 
-from app.agent.aiops import PlanExecuteState, executor, planner, replanner
+from app.agent.aiops.executor import executor
+from app.agent.aiops.planner import planner
+from app.agent.aiops.replanner import replanner
+from app.agent.aiops.state import PlanExecuteState
 from app.services.chat_trace_service import ChatTraceObserver
 
 # 节点名称常量

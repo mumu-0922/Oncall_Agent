@@ -195,6 +195,46 @@ curl -X POST "http://localhost:9900/api/aiops" \
   --no-buffer
 ```
 
+## 📊 评测与真实指标
+
+本项目保留可回放的离线评测，避免只靠主观 demo 讲效果。
+
+### RAG 检索评测
+
+```bash
+make eval-retrieval
+make eval-rag MODE=hybrid_parent
+```
+
+输出位置：
+
+- `evals/retrieval_local_report.json`
+- `evals/reports/retrieval_hybrid_parent.json`
+
+### AIOps Agent 评测
+
+```bash
+make eval-aiops
+```
+
+输出位置：
+
+- `evals/reports/aiops_agent_eval.json`
+
+当前离线 trace benchmark 结果：
+
+| 指标 | 数值 | 含义 |
+|------|------|------|
+| `tool_call_success_rate` | `0.5` | 6 个 case 中包含 3 个故意设计的失败/超时路径，因此不是粉饰后的 100%。 |
+| `expected_tool_hit_rate` | `1.0` | 期望调用的工具均在 trace 中出现。 |
+| `evidence_coverage` | `1.0` | 报告引用了对应 Evidence ID，包括 `E001-tool_error`。 |
+| `hallucination_block_rate` | `1.0` | 无证据时未输出“内存泄漏/CPU 死循环”等未经证实根因。 |
+| `insufficient_evidence_rate` | `0.3333` | 日志源缺失、无工具证据等场景明确返回证据不足。 |
+| `timeout_rate` | `0.1667` | Prometheus range 查询超时 case 被独立统计。 |
+| `avg_latency_ms` | `0.1717` | 离线 trace 评测平均耗时，不包含 LLM/网络调用。 |
+
+说明：AIOps 评测默认是 `offline_trace`，不调用 LLM、不访问真实 MCP/Prometheus，目的是稳定验证“工具证据与报告边界”。真实运行态仍以 `/api/aiops/self-check`、执行轨迹和 Evidence Package 为准。
+
 ## 📁 项目结构
 
 ```
