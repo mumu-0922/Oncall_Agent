@@ -109,6 +109,7 @@ class SuperBizAgentApp {
         this.sidebar = document.querySelector('.sidebar');
         this.newChatBtn = document.getElementById('newChatBtn');
         this.aiOpsSidebarBtn = document.getElementById('aiOpsSidebarBtn');
+        this.selfCheckBtn = document.getElementById('selfCheckBtn');
         
         // 输入区域元素
         this.messageInput = document.getElementById('messageInput');
@@ -142,6 +143,11 @@ class SuperBizAgentApp {
         // AI Ops按钮
         if (this.aiOpsSidebarBtn) {
             this.aiOpsSidebarBtn.addEventListener('click', () => this.triggerAIOps());
+        }
+
+        // 一键自诊断按钮
+        if (this.selfCheckBtn) {
+            this.selfCheckBtn.addEventListener('click', () => this.triggerSelfCheck());
         }
         
         // 模式选择下拉菜单
@@ -671,6 +677,14 @@ class SuperBizAgentApp {
         // 更新发送按钮状态
         if (this.sendButton) {
             this.sendButton.disabled = this.isStreaming;
+        }
+
+        if (this.selfCheckBtn) {
+            this.selfCheckBtn.disabled = this.isStreaming;
+        }
+
+        if (this.aiOpsSidebarBtn) {
+            this.aiOpsSidebarBtn.disabled = this.isStreaming;
         }
         
         // 更新输入框状态
@@ -2020,6 +2034,123 @@ class SuperBizAgentApp {
             this.currentAIOpsMessage = null;
             this.updateUI();
         }
+    }
+
+    // 触发一键自诊断：确定性探测，不调用 LLM
+    async triggerSelfCheck() {
+        if (this.isStreaming) {
+            this.showNotification('请等待当前操作完成', 'warning');
+            return;
+        }
+
+        this.newChat();
+
+        const userPrompt = '执行 AIOps 一键自诊断：检查 FastAPI、MCP、search_local_logs、本机日志、LLM/Embedding/Prometheus 配置；必须返回真实原因，不要使用假数据。';
+        this.addMessage('user', userPrompt);
+        const loadingMessage = this.addLoadingMessage('自诊断中...');
+
+        this.isStreaming = true;
+        this.updateUI();
+
+        try {
+            const response = await fetch(`${this.apiBaseUrl}/aiops/self-check`, {
+                method: 'GET',
+                headers: {
+                    'Accept': 'application/json',
+                },
+            });
+
+            if (!response.ok) {
+                throw new Error(`HTTP错误: ${response.status}`);
+            }
+
+            const payload = await response.json();
+            if (payload.code !== 200 || !payload.data) {
+                throw new Error(payload.message || '自诊断接口返回异常');
+            }
+
+            const report = this.renderSelfCheckReport(payload.data);
+            const traceEvents = this.selfCheckToTraceEvents(payload.data);
+            this.updateAIOpsMessage(loadingMessage, report, [], traceEvents);
+        } catch (error) {
+            console.error('一键自诊断失败:', error);
+            if (loadingMessage) {
+                const messageContent = loadingMessage.querySelector('.message-content');
+                if (messageContent) {
+                    messageContent.classList.remove('loading-message-content');
+                    messageContent.innerHTML = this.renderMarkdown(`## ❌ 一键自诊断失败\n\n真实原因：${this.escapeHtml(error.message)}`);
+                }
+            }
+        } finally {
+            this.isStreaming = false;
+            this.updateUI();
+        }
+    }
+
+    renderSelfCheckReport(data) {
+        const report = data?.report || '';
+        if (report.trim()) {
+            return report;
+        }
+
+        const lines = [
+            '# AIOps 一键自诊断报告',
+            '',
+            `- 总体状态：**${data?.status || 'unknown'}**`,
+            `- 生成时间：\`${data?.generated_at || '-'}\``,
+            `- 耗时：\`${data?.took_ms ?? '-'} ms\``,
+            '',
+            '## 检查结果',
+        ];
+
+        const components = Array.isArray(data?.components) ? data.components : [];
+        components.forEach(component => {
+            lines.push(`- ${this.selfCheckStatusIcon(component.status)} **${component.name}**：${component.summary || ''}`);
+        });
+        lines.push('', '## 说明', '- 本报告由确定性探测生成，未调用 LLM 编写结论。');
+        return lines.join('\n');
+    }
+
+    selfCheckToTraceEvents(data) {
+        const components = Array.isArray(data?.components) ? data.components : [];
+        return components.map((component, index) => ({
+            kind: component.name === 'search_local_logs' ? 'tool_result' : 'stage',
+            title: `自诊断：${component.name}`,
+            status: this.selfCheckTraceStatus(component.status),
+            node: 'self-check',
+            tool: component.name === 'search_local_logs' ? 'search_local_logs' : undefined,
+            summary: component.name === 'search_local_logs'
+                ? JSON.stringify({
+                    tool: 'search_local_logs',
+                    source: component.details?.source,
+                    total: component.details?.total,
+                    logs: component.details?.sampled_logs,
+                    scanned_files: component.details?.scanned_files,
+                    query: component.details?.query,
+                    error: component.details?.error,
+                    message: component.summary,
+                })
+                : component.summary,
+            metadata: component.details || {},
+            timestamp: data?.generated_at,
+            duration_ms: index === components.length - 1 ? data?.took_ms : undefined,
+        }));
+    }
+
+    selfCheckTraceStatus(status) {
+        if (status === 'ok' || status === 'skipped') return 'completed';
+        if (status === 'error') return 'error';
+        return 'info';
+    }
+
+    selfCheckStatusIcon(status) {
+        const icons = {
+            ok: '✅',
+            warn: '⚠️',
+            error: '❌',
+            skipped: '⏭️',
+        };
+        return icons[status] || '•';
     }
 
     // 显示/隐藏加载遮罩层

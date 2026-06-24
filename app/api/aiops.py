@@ -3,14 +3,31 @@ AIOps 智能运维接口
 """
 
 import json
+
 from fastapi import APIRouter
-from sse_starlette.sse import EventSourceResponse
 from loguru import logger
+from sse_starlette.sse import EventSourceResponse
 
 from app.models.aiops import AIOpsRequest
+from app.services.aiops_self_check_service import aiops_self_check_service
 from app.services.aiops_service import aiops_service
 
 router = APIRouter()
+
+
+@router.get("/aiops/self-check")
+async def self_check():
+    """AIOps 一键自诊断接口。
+
+    该接口只执行确定性探测：健康状态、MCP endpoint、工具加载、本机日志、
+    Prometheus 配置等；不调用 LLM，不生成推测性故障结论。
+    """
+    result = await aiops_self_check_service.run()
+    return {
+        "code": 200,
+        "message": "success",
+        "data": result,
+    }
 
 
 @router.post("/aiops")
