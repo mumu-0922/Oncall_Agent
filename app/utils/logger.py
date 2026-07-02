@@ -3,8 +3,12 @@
 使用 Loguru 配置应用日志
 """
 
+import os
 import sys
+from pathlib import Path
+
 from loguru import logger
+
 from app.config import config
 
 
@@ -29,9 +33,12 @@ def setup_logger():
         diagnose=config.debug,  # Debug 模式下显示变量值
     )
 
+    log_file = os.getenv("APP_LOG_FILE", "logs/app_{time:YYYY-MM-DD}.log").strip()
+    Path(log_file).expanduser().parent.mkdir(parents=True, exist_ok=True)
+
     # 添加文件输出（按天轮转，自动压缩）
     logger.add(
-        "logs/app_{time:YYYY-MM-DD}.log",
+        log_file,
         rotation="00:00",  # 每天0点自动切割新日志文件
         retention="7 days",  # 仅保留最近7天的日志
         compression="zip",  # 过期日志自动压缩为zip

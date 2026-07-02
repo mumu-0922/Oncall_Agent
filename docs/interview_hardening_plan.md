@@ -20,7 +20,7 @@
 
 当前限制：
 
-- [ ] VPS 生产部署模板未完成。
+- [ ] VPS 生产部署产物已补齐，但尚未在全新 VPS 执行从零部署验收。
 - [ ] nginx / docker / systemd 日志接入未完成。
 - [ ] Runbook 半自动自愈未完成。
 - [ ] 公网部署鉴权、速率限制、安全加固未完成。
@@ -178,24 +178,24 @@ make eval-aiops
 
 ### 交付物
 
-- [ ] 新增 `.env.production.example`
-- [ ] 新增 `docker-compose.prod.yml`
-- [ ] 新增 `scripts/deploy_vps.sh`
-- [ ] 新增 `scripts/healthcheck.sh`
-- [ ] 新增 `docs/vps_deployment.md`
-- [ ] README 增加 VPS 部署章节
+- [x] 新增 `.env.production.example`
+- [x] 新增 `docker-compose.prod.yml`
+- [x] 新增 `scripts/deploy_vps.sh`
+- [x] 新增 `scripts/healthcheck.sh`
+- [x] 新增 `docs/vps_deployment.md`
+- [x] README 增加 VPS 部署章节
 
 ### 部署 checklist
 
-- [ ] FastAPI 后端
-- [ ] CLS MCP
-- [ ] Monitor MCP
-- [ ] Prometheus
-- [ ] node_exporter
-- [ ] Alertmanager
-- [ ] nginx reverse proxy
-- [ ] 日志目录与权限说明
-- [ ] systemd 或 Docker Compose 自启动说明
+- [x] FastAPI 后端
+- [x] CLS MCP
+- [x] Monitor MCP
+- [x] Prometheus
+- [x] node_exporter
+- [x] Alertmanager
+- [x] nginx reverse proxy
+- [x] 日志目录与权限说明
+- [x] systemd 或 Docker Compose 自启动说明
 
 ### 验收命令
 
@@ -209,7 +209,7 @@ curl -sS http://127.0.0.1:9900/api/aiops/self-check
 
 - [ ] 新 VPS 可按文档从零启动
 - [ ] self-check 能显示真实 VPS 环境状态
-- [ ] 部署失败时有明确错误定位步骤
+- [x] 部署失败时有明确错误定位步骤
 
 ---
 
@@ -352,3 +352,22 @@ curl -sS http://127.0.0.1:9900/api/aiops/self-check
   - 当前是离线 trace benchmark，不代表真实 LLM 每次都会选择同样工具；后续可扩展 live-agent eval。
   - 当前 case 数为 6，覆盖关键链路但还不算大规模评测集。
   - `tool_call_success_rate=0.5` 包含故意设计的错误/超时 case，不能解读为系统正常场景只有 50% 成功率。
+
+
+### 2026-06-24 - P3 VPS 部署闭环
+
+- 改动：
+  - 新增 `.env.production.example`，提供生产占位配置，默认 `AIOPS_ALLOW_MOCK=false`，日志使用 `AIOPS_SERVICE_LOG_MAP` 白名单，指标使用 Prometheus/Alertmanager。
+  - 新增 `Dockerfile` 与 `docker-compose.prod.yml`，编排 FastAPI、CLS MCP、Monitor MCP、Prometheus、Alertmanager、node_exporter、nginx。
+  - 新增 `deploy/nginx/oncall-agent.conf`，反代 FastAPI，并对 `/api/aiops` 关闭 buffering 以支持 SSE。
+  - 新增 `scripts/deploy_vps.sh`，部署前校验 `.env.production` 中核心 LLM 配置是否仍为占位符，拒绝假部署。
+  - 新增 `scripts/healthcheck.sh`，检查 `/health`、`/api/aiops/self-check`、MCP endpoint、Prometheus、Alertmanager、nginx。
+  - 新增 `docs/vps_deployment.md`，覆盖首次部署、健康检查、日志/指标接入、nginx、systemd 自启动、更新与回滚。
+  - `app/utils/logger.py` 支持 `APP_LOG_FILE`，MCP 服务支持 `MCP_CLS_HOST/PORT/LOG_FILE` 与 `MCP_MONITOR_HOST/PORT/LOG_FILE`，适配容器生产运行。
+  - 新增 `tests/test_vps_deployment_artifacts.py`，防止部署产物缺失、误写真实密钥、漏掉真实健康检查路径。
+- 验证：
+  - 待本轮运行：`ruff`、`pytest tests/test_vps_deployment_artifacts.py`、`docker compose config`、`scripts/healthcheck.sh`。
+- 剩余风险：
+  - 当前是在 Win + WSL 开发环境内准备部署闭环，不等同于新 VPS 已真实上线。
+  - `新 VPS 可按文档从零启动` 与 `self-check 能显示真实 VPS 环境状态` 仍需在目标 VPS 上执行 `bash scripts/deploy_vps.sh && bash scripts/healthcheck.sh` 后再打勾。
+  - 公网访问鉴权、HTTPS、CORS 白名单、限流仍属于 P6。

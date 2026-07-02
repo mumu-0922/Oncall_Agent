@@ -133,6 +133,27 @@ python -c "import requests, os, time; [requests.post('http://localhost:9900/api/
 - **API 文档**: http://localhost:9900/docs
 - **开发态 Vite 前端**: http://localhost:5173（仅前端开发时单独启动）
 
+
+## 🏭 VPS 生产部署
+
+本项目已提供 Docker Compose 生产部署闭环：FastAPI、CLS MCP、Monitor MCP、Prometheus、Alertmanager、node_exporter 与 nginx reverse proxy。
+
+```bash
+cp .env.production.example .env.production
+vim .env.production
+bash scripts/deploy_vps.sh
+bash scripts/healthcheck.sh
+```
+
+常用验收命令：
+
+```bash
+curl -sS http://127.0.0.1:9900/health
+curl -sS http://127.0.0.1:9900/api/aiops/self-check
+```
+
+说明：`self-check` 是确定性探测，不调用 LLM；如果日志、MCP 或 Prometheus 未接通，会返回真实错误原因，不生成假诊断。完整部署、日志白名单、指标接入、systemd 自启动和回滚步骤见 `docs/vps_deployment.md`。
+
 ## 🧭 前端架构
 
 本项目采用“开发态分离、生产态一体托管”的前端架构，详见 `docs/frontend_architecture_decision.md`。

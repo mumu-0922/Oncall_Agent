@@ -45,6 +45,7 @@ poetry.lock
 # Environment
 .env
 .env.local
+.env.production
 
 # Logs
 logs/

@@ -29,6 +29,22 @@ logging.basicConfig(
 )
 logger = logging.getLogger("CLS_MCP_Server")
 
+
+
+def _configure_optional_file_logging() -> None:
+    """把 MCP 日志同步写入生产日志目录，供 search_local_logs 白名单读取。"""
+    log_file = os.getenv("MCP_CLS_LOG_FILE", "").strip()
+    if not log_file:
+        return
+    log_path = Path(log_file).expanduser()
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    handler = logging.FileHandler(log_path, encoding="utf-8")
+    handler.setFormatter(logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s"))
+    logger.addHandler(handler)
+
+
+_configure_optional_file_logging()
+
 mcp = FastMCP("CLS")
 
 
@@ -1103,4 +1119,9 @@ def search_log(
 
 
 if __name__ == "__main__":
-    mcp.run(transport="streamable-http", host="127.0.0.1", port=8003, path="/mcp")
+    mcp.run(
+        transport="streamable-http",
+        host=os.getenv("MCP_CLS_HOST", "127.0.0.1"),
+        port=int(os.getenv("MCP_CLS_PORT", "8003")),
+        path="/mcp",
+    )
